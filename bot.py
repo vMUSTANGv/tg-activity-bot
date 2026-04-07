@@ -117,7 +117,7 @@ async def db_connect():
         _turso = TursoHTTP(TURSO_URL, TURSO_TOKEN)
 
 
-SCHEMA_STATEMENTS = [
+CREATE_TABLES = [
     """CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id INTEGER NOT NULL,
@@ -154,6 +154,9 @@ SCHEMA_STATEMENTS = [
         chat_id INTEGER NOT NULL,
         ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""",
+]
+
+CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_msg_chat ON messages(chat_id)",
     "CREATE INDEX IF NOT EXISTS idx_msg_chat_msgid ON messages(chat_id, message_id)",
     "CREATE INDEX IF NOT EXISTS idx_react_chat ON reactions(chat_id)",
@@ -179,7 +182,8 @@ async def _safe_migrate(stmt: str):
             con.commit()
             con.close()
     except Exception as e:
-        if "duplicate column" in str(e).lower():
+        msg = str(e).lower()
+        if "duplicate column" in msg or "already exists" in msg:
             return
         log.warning(f"Migration skipped ({stmt}): {e}")
 
@@ -187,22 +191,31 @@ async def _safe_migrate(stmt: str):
 async def init_db():
     if USE_TURSO:
         await db_connect()
-        for stmt in SCHEMA_STATEMENTS:
+        # Порядок важен: таблицы → миграции колонок → индексы (индексы могут
+        # ссылаться на колонки, добавленные миграциями).
+        for stmt in CREATE_TABLES:
             await _turso.execute(stmt)
         for stmt in MIGRATIONS:
             await _safe_migrate(stmt)
+        for stmt in CREATE_INDEXES:
+            await _turso.execute(stmt)
         log.info("Turso DB initialized")
     else:
         db_dir = os.path.dirname(DB_PATH)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
         con = sqlite3.connect(DB_PATH)
-        for stmt in SCHEMA_STATEMENTS:
+        for stmt in CREATE_TABLES:
             con.execute(stmt)
         con.commit()
         con.close()
         for stmt in MIGRATIONS:
             await _safe_migrate(stmt)
+        con = sqlite3.connect(DB_PATH)
+        for stmt in CREATE_INDEXES:
+            con.execute(stmt)
+        con.commit()
+        con.close()
         log.info(f"Local SQLite initialized at {DB_PATH}")
 
 
