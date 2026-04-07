@@ -32,6 +32,7 @@ DB_PATH = os.getenv("DB_PATH", "activity.db")
 USE_TURSO = bool(TURSO_URL)
 
 SUMMARY_MSG_COUNT = 300
+SUMMARY_COOLDOWN_SEC = 5 * 60
 PORT = int(os.getenv("PORT", "10000"))
 
 logging.basicConfig(level=logging.INFO)
@@ -377,6 +378,18 @@ async def upsert_member_seen(chat_id: int, user_id: int, username: str | None, f
             "INSERT INTO chat_members (chat_id, user_id, username, full_name, last_seen_ts) VALUES (?,?,?,?,CURRENT_TIMESTAMP)",
             (chat_id, user_id, username, full_name),
         )
+
+
+@router.edited_message()
+async def on_edited_message(msg: Message):
+    """Если пользователь отредактировал сообщение — обновляем текст в БД."""
+    if not msg.from_user or not is_group(msg):
+        return
+    new_text = (msg.text or msg.caption or "")[:4000]
+    await db_execute(
+        "UPDATE messages SET text=? WHERE chat_id=? AND message_id=? AND user_id=?",
+        (new_text, msg.chat.id, msg.message_id, msg.from_user.id),
+    )
 
 
 @router.chat_member()
@@ -924,10 +937,27 @@ async def cmd_digest(msg: Message):
     await msg.answer("\n".join(lines), parse_mode="Markdown", disable_notification=True)
 
 
+_summary_last_call: dict[int, float] = {}
+
+
 @router.message(Command("summary"))
 async def cmd_summary(msg: Message):
     if not is_group(msg):
         return
+
+    import time as _time
+    now = _time.monotonic()
+    last = _summary_last_call.get(msg.chat.id, 0)
+    elapsed = now - last
+    if elapsed < SUMMARY_COOLDOWN_SEC:
+        wait_sec = int(SUMMARY_COOLDOWN_SEC - elapsed)
+        await msg.answer(
+            f"⏳ Подожди ещё {wait_sec // 60} мин {wait_sec % 60} сек — выжимку можно делать раз в {SUMMARY_COOLDOWN_SEC // 60} минут.",
+            disable_notification=True,
+        )
+        return
+    _summary_last_call[msg.chat.id] = now
+
     if not groq_client:
         await msg.answer("GROQ_API_KEY не настроен.")
         return
@@ -1019,7 +1049,7 @@ async def on_startup(app_or_bot=None):
     await bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
     await bot.set_my_commands(PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())
     url = f"{RENDER_URL}{WEBHOOK_PATH}"
-    await bot.set_webhook(url, allowed_updates=["message", "message_reaction", "poll_answer", "callback_query", "chat_member"])
+    await bot.set_webhook(url, allowed_updates=["message", "edited_message", "message_reaction", "poll_answer", "callback_query", "chat_member"])
     log.info(f"Webhook set: {url}")
 
 
