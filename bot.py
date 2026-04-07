@@ -8,7 +8,7 @@ import logging
 import httpx
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import (
-    Message, PollAnswer, MessageReactionUpdated, CallbackQuery,
+    Message, PollAnswer, MessageReactionUpdated, CallbackQuery, ChatMemberUpdated,
     BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
@@ -165,6 +165,16 @@ CREATE_TABLES = [
         ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (chat_id, user_id, badge_key)
     )""",
+    """CREATE TABLE IF NOT EXISTS chat_members (
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        username TEXT,
+        full_name TEXT,
+        joined_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_seen_ts TIMESTAMP,
+        left_ts TIMESTAMP,
+        PRIMARY KEY (chat_id, user_id)
+    )""",
 ]
 
 CREATE_INDEXES = [
@@ -172,6 +182,7 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_msg_chat_msgid ON messages(chat_id, message_id)",
     "CREATE INDEX IF NOT EXISTS idx_react_chat ON reactions(chat_id)",
     "CREATE INDEX IF NOT EXISTS idx_react_target ON reactions(chat_id, target_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_members_chat_active ON chat_members(chat_id, left_ts)",
 ]
 
 # Миграции для существующих БД (добавление колонок). ALTER без IF NOT EXISTS,
@@ -333,6 +344,56 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     ])
 
 
+async def upsert_member_seen(chat_id: int, user_id: int, username: str | None, full_name: str | None):
+    """Отметить участника как живого и видимого. Создаёт запись если её ещё нет."""
+    existing = await db_fetchall(
+        "SELECT 1 FROM chat_members WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id),
+    )
+    if existing:
+        await db_execute(
+            "UPDATE chat_members SET username=?, full_name=?, last_seen_ts=CURRENT_TIMESTAMP, left_ts=NULL WHERE chat_id=? AND user_id=?",
+            (username, full_name, chat_id, user_id),
+        )
+    else:
+        await db_execute(
+            "INSERT INTO chat_members (chat_id, user_id, username, full_name, last_seen_ts) VALUES (?,?,?,?,CURRENT_TIMESTAMP)",
+            (chat_id, user_id, username, full_name),
+        )
+
+
+@router.chat_member()
+async def on_chat_member(event: ChatMemberUpdated):
+    """Отслеживает входы/выходы участников группы."""
+    if event.chat.type not in ("group", "supergroup"):
+        return
+    member = event.new_chat_member
+    user = member.user
+    if not user or user.is_bot:
+        return
+    status = member.status
+    if status in ("member", "administrator", "creator", "restricted"):
+        existing = await db_fetchall(
+            "SELECT 1 FROM chat_members WHERE chat_id=? AND user_id=?",
+            (event.chat.id, user.id),
+        )
+        if existing:
+            await db_execute(
+                "UPDATE chat_members SET username=?, full_name=?, left_ts=NULL WHERE chat_id=? AND user_id=?",
+                (user.username, user.full_name, event.chat.id, user.id),
+            )
+        else:
+            await db_execute(
+                "INSERT INTO chat_members (chat_id, user_id, username, full_name) VALUES (?,?,?,?)",
+                (event.chat.id, user.id, user.username, user.full_name),
+            )
+    elif status in ("left", "kicked"):
+        await db_execute(
+            "UPDATE chat_members SET left_ts=CURRENT_TIMESTAMP WHERE chat_id=? AND user_id=?",
+            (event.chat.id, user.id),
+        )
+
+
 @router.message(~Command("stats", "summary", "start", "help", "silent", "digest", "menu"))
 async def on_message(msg: Message):
     if not msg.from_user or not is_group(msg):
@@ -342,6 +403,7 @@ async def on_message(msg: Message):
         (msg.chat.id, msg.message_id, msg.from_user.id, msg.from_user.username,
          msg.from_user.full_name, (msg.text or msg.caption or "")[:4000]),
     )
+    await upsert_member_seen(msg.chat.id, msg.from_user.id, msg.from_user.username, msg.from_user.full_name)
     # Если в сообщении опрос — запоминаем привязку poll_id → chat_id.
     if msg.poll:
         await db_execute(
@@ -672,25 +734,33 @@ async def cmd_stats(msg: Message):
 
 async def _render_silent(chat_id: int, days: int) -> str:
     rows = await db_fetchall(
-        """SELECT user_id,
-                  (SELECT username FROM messages WHERE chat_id=? AND user_id=m.user_id ORDER BY id DESC LIMIT 1) un,
-                  (SELECT full_name FROM messages WHERE chat_id=? AND user_id=m.user_id ORDER BY id DESC LIMIT 1) fn,
-                  MAX(ts) last_ts,
-                  COUNT(*) total
-           FROM messages m
+        """SELECT user_id, username, full_name, last_seen_ts, joined_ts
+           FROM chat_members
            WHERE chat_id=?
-           GROUP BY user_id
-           HAVING MAX(ts) < datetime('now','-' || ? || ' days')
-           ORDER BY last_ts ASC
-           LIMIT 30""",
-        (chat_id, chat_id, chat_id, days),
+             AND left_ts IS NULL
+             AND (last_seen_ts IS NULL OR last_seen_ts < datetime('now','-' || ? || ' days'))
+           ORDER BY (last_seen_ts IS NULL) DESC, last_seen_ts ASC
+           LIMIT 50""",
+        (chat_id, days),
     )
     if not rows:
         return f"😎 Молчунов за {days} дней нет — все на связи."
+
+    never_wrote = [r for r in rows if r[3] is None]
+    silent = [r for r in rows if r[3] is not None]
+
     lines = [f"😴 *Молчуны* (нет сообщений {days}+ дней)\n"]
-    for uid, uname, fname, last_ts, total in rows:
-        last_short = (last_ts or "")[:10]
-        lines.append(f"• {user_label(uid, uname, fname)} — последний раз {last_short} (всего: {total})")
+    if silent:
+        for uid, un, fn, last_seen, _ in silent:
+            last_short = (last_seen or "")[:10]
+            lines.append(f"• {user_label(uid, un, fn)} — последний раз {last_short}")
+    if never_wrote:
+        if silent:
+            lines.append("")
+        lines.append("👻 *Ни разу не писали:*")
+        for uid, un, fn, _, joined in never_wrote:
+            joined_short = (joined or "")[:10]
+            lines.append(f"• {user_label(uid, un, fn)} — в чате с {joined_short}")
     lines.append("\n_Использование: /silent [дней]_")
     return "\n".join(lines)
 
@@ -885,7 +955,7 @@ async def on_startup(app_or_bot=None):
     await bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
     await bot.set_my_commands(PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())
     url = f"{RENDER_URL}{WEBHOOK_PATH}"
-    await bot.set_webhook(url, allowed_updates=["message", "message_reaction", "poll_answer", "callback_query"])
+    await bot.set_webhook(url, allowed_updates=["message", "message_reaction", "poll_answer", "callback_query", "chat_member"])
     log.info(f"Webhook set: {url}")
 
 
