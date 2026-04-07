@@ -1,0 +1,3 @@
+aiogram>=3.10
+google-generativeai>=0.8
+aiohttp>=3.9
