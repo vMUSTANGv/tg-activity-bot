@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 import os
+import base64
 import asyncio
 import sqlite3
 import logging
 
+import httpx
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message, PollAnswer, MessageReactionUpdated
 from aiogram.filters import Command, CommandStart
@@ -41,22 +43,78 @@ router = Router()
 dp.include_router(router)
 
 
-# ---------- DB layer (Turso async / sqlite sync) ----------
+# ---------- DB layer (Turso HTTP / sqlite sync) ----------
 
-_libsql_client = None
+class TursoHTTP:
+    """Минимальный async-клиент к Turso v2 pipeline API.
+    Используется вместо libsql-client (он сломан с актуальным сервером)."""
 
-if USE_TURSO:
-    import libsql_client
+    def __init__(self, url: str, token: str):
+        if url.startswith("libsql://"):
+            url = "https://" + url[len("libsql://"):]
+        self.url = url.rstrip("/") + "/v2/pipeline"
+        self.headers = {"Authorization": f"Bearer {token}"}
+        self._client = httpx.AsyncClient(timeout=30.0)
+
+    @staticmethod
+    def _arg(v):
+        if v is None:
+            return {"type": "null", "value": None}
+        if isinstance(v, bool):
+            return {"type": "integer", "value": str(int(v))}
+        if isinstance(v, int):
+            return {"type": "integer", "value": str(v)}
+        if isinstance(v, float):
+            return {"type": "float", "value": v}
+        if isinstance(v, (bytes, bytearray)):
+            return {"type": "blob", "base64": base64.b64encode(v).decode()}
+        return {"type": "text", "value": str(v)}
+
+    @staticmethod
+    def _decode_cell(cell):
+        t = cell.get("type")
+        v = cell.get("value")
+        if t == "null":
+            return None
+        if t == "integer":
+            return int(v) if v is not None else None
+        if t == "float":
+            return float(v) if v is not None else None
+        return v
+
+    async def execute(self, sql: str, params=()):
+        payload = {
+            "requests": [
+                {"type": "execute", "stmt": {
+                    "sql": sql,
+                    "args": [self._arg(p) for p in params],
+                }},
+                {"type": "close"},
+            ]
+        }
+        r = await self._client.post(self.url, headers=self.headers, json=payload)
+        r.raise_for_status()
+        data = r.json()
+        results = data.get("results", [])
+        if not results:
+            return []
+        first = results[0]
+        if first.get("type") == "error":
+            raise RuntimeError(f"Turso error: {first.get('error')}")
+        result = first.get("response", {}).get("result", {})
+        rows = []
+        for row in result.get("rows", []):
+            rows.append(tuple(self._decode_cell(c) for c in row))
+        return rows
+
+
+_turso: TursoHTTP | None = None
 
 
 async def db_connect():
-    global _libsql_client
-    if USE_TURSO and _libsql_client is None:
-        # libsql-client по умолчанию пытается ws/wss, но Turso стабильнее по HTTPS.
-        url = TURSO_URL
-        if url.startswith("libsql://"):
-            url = "https://" + url[len("libsql://"):]
-        _libsql_client = libsql_client.create_client(url=url, auth_token=TURSO_TOKEN)
+    global _turso
+    if USE_TURSO and _turso is None:
+        _turso = TursoHTTP(TURSO_URL, TURSO_TOKEN)
 
 
 SCHEMA_STATEMENTS = [
@@ -114,7 +172,7 @@ MIGRATIONS = [
 async def _safe_migrate(stmt: str):
     try:
         if USE_TURSO:
-            await _libsql_client.execute(stmt)
+            await _turso.execute(stmt)
         else:
             con = sqlite3.connect(DB_PATH)
             con.execute(stmt)
@@ -130,7 +188,7 @@ async def init_db():
     if USE_TURSO:
         await db_connect()
         for stmt in SCHEMA_STATEMENTS:
-            await _libsql_client.execute(stmt)
+            await _turso.execute(stmt)
         for stmt in MIGRATIONS:
             await _safe_migrate(stmt)
         log.info("Turso DB initialized")
@@ -151,7 +209,7 @@ async def init_db():
 async def db_execute(sql: str, params=()):
     """INSERT/UPDATE — без возврата."""
     if USE_TURSO:
-        await _libsql_client.execute(sql, list(params))
+        await _turso.execute(sql, list(params))
     else:
         con = sqlite3.connect(DB_PATH)
         con.execute(sql, params)
@@ -162,8 +220,7 @@ async def db_execute(sql: str, params=()):
 async def db_fetchall(sql: str, params=()):
     """SELECT — список tuple."""
     if USE_TURSO:
-        rs = await _libsql_client.execute(sql, list(params))
-        return [tuple(row) for row in rs.rows]
+        return await _turso.execute(sql, list(params))
     else:
         con = sqlite3.connect(DB_PATH)
         rows = con.execute(sql, params).fetchall()
