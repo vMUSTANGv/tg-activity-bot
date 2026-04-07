@@ -7,7 +7,11 @@ import logging
 
 import httpx
 from aiogram import Bot, Dispatcher, Router
-from aiogram.types import Message, PollAnswer, MessageReactionUpdated, BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats
+from aiogram.types import (
+    Message, PollAnswer, MessageReactionUpdated, CallbackQuery,
+    BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+)
 from aiogram.filters import Command, CommandStart
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
@@ -309,7 +313,27 @@ async def check_and_award(chat_id: int, user_id: int, category: str, count: int,
 
 # ---------- handlers ----------
 
-@router.message(~Command("stats", "summary", "start", "help", "silent", "digest"))
+def main_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📊 Статистика", callback_data="stats:all"),
+            InlineKeyboardButton(text="🗞 Дайджест недели", callback_data="digest"),
+        ],
+        [
+            InlineKeyboardButton(text="📝 AI-выжимка", callback_data="summary"),
+            InlineKeyboardButton(text="😴 Молчуны", callback_data="silent:14"),
+        ],
+        [
+            InlineKeyboardButton(text="📅 Неделя", callback_data="stats:week"),
+            InlineKeyboardButton(text="🗓 Месяц", callback_data="stats:month"),
+        ],
+        [
+            InlineKeyboardButton(text="❓ Помощь", callback_data="help"),
+        ],
+    ])
+
+
+@router.message(~Command("stats", "summary", "start", "help", "silent", "digest", "menu"))
 async def on_message(msg: Message):
     if not msg.from_user or not is_group(msg):
         return
@@ -450,15 +474,111 @@ async def on_poll_answer(answer: PollAnswer):
 @router.message(CommandStart())
 async def cmd_start(msg: Message):
     await msg.answer(
-        "Activity Bot\n\n"
-        "Отслеживаю активность в чате:\n"
-        "- сообщения\n"
-        "- реакции (лайки)\n"
-        "- голоса в опросах\n\n"
-        "/stats - топ активности\n"
-        "/summary - выжимка 300 сообщений\n"
-        "/help - справка"
+        "👋 *Activity Bot*\n\n"
+        "Веду статистику по чату: сообщения, реакции, опросы. "
+        "Делаю AI-выжимки и дайджесты, выдаю достижения.\n\n"
+        "Нажми кнопку или используй /menu в любой момент.",
+        reply_markup=main_menu_kb(),
+        parse_mode="Markdown",
     )
+
+
+@router.message(Command("menu"))
+async def cmd_menu(msg: Message):
+    await msg.answer("📋 *Меню бота*", reply_markup=main_menu_kb(), parse_mode="Markdown")
+
+
+# ---------- callback handlers ----------
+
+async def _render_stats(chat_id: int, period: str) -> str:
+    pf, _ = period_filter(period)
+    period_label = {"all": "за всё время", "week": "за неделю", "month": "за месяц"}[period]
+
+    rows_msg = await db_fetchall(
+        f"SELECT user_id, username, full_name, COUNT(*) cnt FROM messages WHERE chat_id=?{pf} GROUP BY user_id ORDER BY cnt DESC LIMIT 15",
+        (chat_id,),
+    )
+    rows_react_given = await db_fetchall(
+        f"SELECT user_id, username, full_name, COUNT(*) cnt FROM reactions WHERE chat_id=? AND direction='given'{pf} GROUP BY user_id ORDER BY cnt DESC LIMIT 10",
+        (chat_id,),
+    )
+    rows_react_recv = await db_fetchall(
+        f"""SELECT r.target_user_id,
+                  (SELECT username FROM messages m WHERE m.user_id=r.target_user_id AND m.chat_id=r.chat_id ORDER BY m.id DESC LIMIT 1) un,
+                  (SELECT full_name FROM messages m WHERE m.user_id=r.target_user_id AND m.chat_id=r.chat_id ORDER BY m.id DESC LIMIT 1) fn,
+                  COUNT(*) cnt
+            FROM reactions r
+            WHERE r.chat_id=? AND r.target_user_id IS NOT NULL{pf.replace('ts', 'r.ts')}
+            GROUP BY r.target_user_id
+            ORDER BY cnt DESC LIMIT 10""",
+        (chat_id,),
+    )
+    rows_polls = await db_fetchall(
+        f"SELECT user_id, username, full_name, COUNT(*) cnt FROM poll_votes WHERE chat_id=?{pf} GROUP BY user_id ORDER BY cnt DESC LIMIT 10",
+        (chat_id,),
+    )
+    total_msg_row = await db_fetchall(f"SELECT COUNT(*) FROM messages WHERE chat_id=?{pf}", (chat_id,))
+    total_react_row = await db_fetchall(f"SELECT COUNT(*) FROM reactions WHERE chat_id=?{pf}", (chat_id,))
+    total_msg = total_msg_row[0][0] if total_msg_row else 0
+    total_react = total_react_row[0][0] if total_react_row else 0
+
+    lines = [
+        f"📊 *Активность чата ({period_label})*\n",
+        f"💬 Сообщений: *{total_msg}* | ❤️ Реакций: *{total_react}*\n",
+    ]
+    if rows_msg:
+        lines.append("🏆 *Топ по сообщениям:*")
+        for i, (uid, un, fn, cnt) in enumerate(rows_msg, 1):
+            lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
+    if rows_react_given:
+        lines.append("\n👍 *Топ по поставленным реакциям:*")
+        for i, (uid, un, fn, cnt) in enumerate(rows_react_given, 1):
+            lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
+    if rows_react_recv:
+        lines.append("\n❤️ *Топ по полученным реакциям:*")
+        for i, (uid, un, fn, cnt) in enumerate(rows_react_recv, 1):
+            lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
+    if rows_polls:
+        lines.append("\n🗳 *Топ по голосованиям:*")
+        for i, (uid, un, fn, cnt) in enumerate(rows_polls, 1):
+            lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
+    if not rows_msg and not rows_react_given:
+        lines.append("Пока нет данных.")
+    return "\n".join(lines)
+
+
+@router.callback_query()
+async def on_callback(cq: CallbackQuery):
+    data = cq.data or ""
+    chat_id = cq.message.chat.id if cq.message else None
+    if not chat_id:
+        await cq.answer()
+        return
+
+    try:
+        if data.startswith("stats:"):
+            period = data.split(":", 1)[1]
+            text = await _render_stats(chat_id, period)
+            await cq.message.answer(text, parse_mode="Markdown")
+        elif data == "digest":
+            await cq.answer("Готовлю дайджест…")
+            await cmd_digest(cq.message)
+            return
+        elif data == "summary":
+            await cq.answer("Генерирую выжимку…")
+            await cmd_summary(cq.message)
+            return
+        elif data.startswith("silent:"):
+            try:
+                days = int(data.split(":", 1)[1])
+            except ValueError:
+                days = 14
+            text = await _render_silent(chat_id, days)
+            await cq.message.answer(text, parse_mode="Markdown")
+        elif data == "help":
+            await cmd_help(cq.message)
+    finally:
+        await cq.answer()
 
 
 @router.message(Command("help"))
@@ -550,15 +670,7 @@ async def cmd_stats(msg: Message):
     await msg.answer("\n".join(lines))
 
 
-@router.message(Command("silent"))
-async def cmd_silent(msg: Message):
-    if not is_group(msg):
-        return
-    args = (msg.text or "").split()
-    days = 14
-    if len(args) > 1 and args[1].isdigit():
-        days = max(1, min(int(args[1]), 365))
-
+async def _render_silent(chat_id: int, days: int) -> str:
     rows = await db_fetchall(
         """SELECT user_id,
                   (SELECT username FROM messages WHERE chat_id=? AND user_id=m.user_id ORDER BY id DESC LIMIT 1) un,
@@ -571,19 +683,27 @@ async def cmd_silent(msg: Message):
            HAVING MAX(ts) < datetime('now','-' || ? || ' days')
            ORDER BY last_ts ASC
            LIMIT 30""",
-        (msg.chat.id, msg.chat.id, msg.chat.id, days),
+        (chat_id, chat_id, chat_id, days),
     )
-
     if not rows:
-        await msg.answer(f"😎 Молчунов за {days} дней нет — все на связи.")
-        return
-
+        return f"😎 Молчунов за {days} дней нет — все на связи."
     lines = [f"😴 *Молчуны* (нет сообщений {days}+ дней)\n"]
     for uid, uname, fname, last_ts, total in rows:
         last_short = (last_ts or "")[:10]
         lines.append(f"• {user_label(uid, uname, fname)} — последний раз {last_short} (всего: {total})")
-    lines.append(f"\n_Использование: /silent [дней]_")
-    await msg.answer("\n".join(lines), parse_mode="Markdown")
+    lines.append("\n_Использование: /silent [дней]_")
+    return "\n".join(lines)
+
+
+@router.message(Command("silent"))
+async def cmd_silent(msg: Message):
+    if not is_group(msg):
+        return
+    args = (msg.text or "").split()
+    days = 14
+    if len(args) > 1 and args[1].isdigit():
+        days = max(1, min(int(args[1]), 365))
+    await msg.answer(await _render_silent(msg.chat.id, days), parse_mode="Markdown")
 
 
 @router.message(Command("digest"))
@@ -744,6 +864,7 @@ async def cmd_summary(msg: Message):
 
 
 GROUP_COMMANDS = [
+    BotCommand(command="menu",    description="📋 Меню бота"),
     BotCommand(command="stats",   description="📊 Топ активности (week|month)"),
     BotCommand(command="digest",  description="🗞 Дайджест за неделю"),
     BotCommand(command="summary", description="📝 AI-выжимка чата"),
