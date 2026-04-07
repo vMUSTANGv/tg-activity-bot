@@ -885,7 +885,7 @@ async def on_startup(app_or_bot=None):
     await bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
     await bot.set_my_commands(PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())
     url = f"{RENDER_URL}{WEBHOOK_PATH}"
-    await bot.set_webhook(url, allowed_updates=["message", "message_reaction", "poll_answer"])
+    await bot.set_webhook(url, allowed_updates=["message", "message_reaction", "poll_answer", "callback_query"])
     log.info(f"Webhook set: {url}")
 
 
