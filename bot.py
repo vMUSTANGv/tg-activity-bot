@@ -16,7 +16,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 RENDER_URL = os.getenv("RENDER_URL", "")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-DB_PATH = "activity.db"
+DB_PATH = os.getenv("DB_PATH", "activity.db")
 SUMMARY_MSG_COUNT = 300
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -34,6 +34,9 @@ dp.include_router(router)
 
 
 def init_db():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.executescript("""
         CREATE TABLE IF NOT EXISTS messages (
@@ -78,8 +81,6 @@ def get_db():
 def user_label(user_id, username, full_name):
     if username:
         return f"@{username}"
-    if full_name:
-        return full_name
     return f"id:{user_id}"
 
 
