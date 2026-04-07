@@ -63,6 +63,7 @@ SCHEMA_STATEMENTS = [
     """CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id INTEGER NOT NULL,
+        message_id INTEGER,
         user_id INTEGER NOT NULL,
         username TEXT,
         full_name TEXT,
@@ -72,9 +73,11 @@ SCHEMA_STATEMENTS = [
     """CREATE TABLE IF NOT EXISTS reactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id INTEGER NOT NULL,
+        message_id INTEGER,
         user_id INTEGER NOT NULL,
         username TEXT,
         full_name TEXT,
+        target_user_id INTEGER,
         emoji TEXT,
         direction TEXT DEFAULT 'given',
         ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -88,9 +91,39 @@ SCHEMA_STATEMENTS = [
         poll_id TEXT,
         ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""",
+    """CREATE TABLE IF NOT EXISTS polls (
+        poll_id TEXT PRIMARY KEY,
+        chat_id INTEGER NOT NULL,
+        ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
     "CREATE INDEX IF NOT EXISTS idx_msg_chat ON messages(chat_id)",
+    "CREATE INDEX IF NOT EXISTS idx_msg_chat_msgid ON messages(chat_id, message_id)",
     "CREATE INDEX IF NOT EXISTS idx_react_chat ON reactions(chat_id)",
+    "CREATE INDEX IF NOT EXISTS idx_react_target ON reactions(chat_id, target_user_id)",
 ]
+
+# Миграции для существующих БД (добавление колонок). ALTER без IF NOT EXISTS,
+# поэтому ловим ошибку "duplicate column".
+MIGRATIONS = [
+    "ALTER TABLE messages ADD COLUMN message_id INTEGER",
+    "ALTER TABLE reactions ADD COLUMN message_id INTEGER",
+    "ALTER TABLE reactions ADD COLUMN target_user_id INTEGER",
+]
+
+
+async def _safe_migrate(stmt: str):
+    try:
+        if USE_TURSO:
+            await _libsql_client.execute(stmt)
+        else:
+            con = sqlite3.connect(DB_PATH)
+            con.execute(stmt)
+            con.commit()
+            con.close()
+    except Exception as e:
+        if "duplicate column" in str(e).lower():
+            return
+        log.warning(f"Migration skipped ({stmt}): {e}")
 
 
 async def init_db():
@@ -98,6 +131,8 @@ async def init_db():
         await db_connect()
         for stmt in SCHEMA_STATEMENTS:
             await _libsql_client.execute(stmt)
+        for stmt in MIGRATIONS:
+            await _safe_migrate(stmt)
         log.info("Turso DB initialized")
     else:
         db_dir = os.path.dirname(DB_PATH)
@@ -108,6 +143,8 @@ async def init_db():
             con.execute(stmt)
         con.commit()
         con.close()
+        for stmt in MIGRATIONS:
+            await _safe_migrate(stmt)
         log.info(f"Local SQLite initialized at {DB_PATH}")
 
 
@@ -147,28 +184,76 @@ def user_label(user_id, username, full_name):
     return f"id:{user_id}"
 
 
+def is_group(msg: Message) -> bool:
+    return msg.chat.type in ("group", "supergroup")
+
+
+def period_filter(period: str):
+    """Возвращает (sql_clause, params) для фильтрации по ts."""
+    if period == "week":
+        return " AND ts >= datetime('now','-7 days')", ()
+    if period == "month":
+        return " AND ts >= datetime('now','-30 days')", ()
+    return "", ()
+
+
 # ---------- handlers ----------
 
 @router.message(~Command("stats", "summary", "start", "help"))
 async def on_message(msg: Message):
-    if not msg.from_user:
+    if not msg.from_user or not is_group(msg):
         return
     await db_execute(
-        "INSERT INTO messages (chat_id, user_id, username, full_name, text) VALUES (?,?,?,?,?)",
-        (msg.chat.id, msg.from_user.id, msg.from_user.username,
+        "INSERT INTO messages (chat_id, message_id, user_id, username, full_name, text) VALUES (?,?,?,?,?,?)",
+        (msg.chat.id, msg.message_id, msg.from_user.id, msg.from_user.username,
          msg.from_user.full_name, (msg.text or msg.caption or "")[:4000]),
     )
+    # Если в сообщении опрос — запоминаем привязку poll_id → chat_id.
+    if msg.poll:
+        await db_execute(
+            "INSERT OR IGNORE INTO polls (poll_id, chat_id) VALUES (?,?)",
+            (msg.poll.id, msg.chat.id),
+        )
 
 
 @router.message_reaction()
 async def on_reaction(event: MessageReactionUpdated):
     if not event.user:
         return
-    for r in (event.new_reaction or []):
-        emoji = getattr(r, "emoji", None) or getattr(r, "custom_emoji_id", "custom")
+
+    # Автор сообщения, на которое ставится реакция.
+    target_row = await db_fetchone(
+        "SELECT user_id FROM messages WHERE chat_id=? AND message_id=? LIMIT 1",
+        (event.chat.id, event.message_id),
+    )
+    target_user_id = target_row[0] if target_row else None
+
+    new_emojis = {
+        getattr(r, "emoji", None) or getattr(r, "custom_emoji_id", "custom")
+        for r in (event.new_reaction or [])
+    }
+    old_emojis = {
+        getattr(r, "emoji", None) or getattr(r, "custom_emoji_id", "custom")
+        for r in (event.old_reaction or [])
+    }
+
+    # Снятые реакции — удаляем соответствующие записи (по одной на эмодзи).
+    for emoji in old_emojis - new_emojis:
         await db_execute(
-            "INSERT INTO reactions (chat_id, user_id, username, full_name, emoji, direction) VALUES (?,?,?,?,?,'given')",
-            (event.chat.id, event.user.id, event.user.username, event.user.full_name, emoji),
+            """DELETE FROM reactions WHERE id = (
+                SELECT id FROM reactions
+                WHERE chat_id=? AND user_id=? AND message_id=? AND emoji=?
+                LIMIT 1
+            )""",
+            (event.chat.id, event.user.id, event.message_id, emoji),
+        )
+
+    # Новые реакции — добавляем.
+    for emoji in new_emojis - old_emojis:
+        await db_execute(
+            "INSERT INTO reactions (chat_id, message_id, user_id, username, full_name, target_user_id, emoji, direction) VALUES (?,?,?,?,?,?,?,'given')",
+            (event.chat.id, event.message_id, event.user.id, event.user.username,
+             event.user.full_name, target_user_id, emoji),
         )
 
 
@@ -176,9 +261,15 @@ async def on_reaction(event: MessageReactionUpdated):
 async def on_poll_answer(answer: PollAnswer):
     if not answer.user:
         return
+    # Достаём chat_id из таблицы polls (заполняется при появлении опроса в чате).
+    poll_row = await db_fetchone(
+        "SELECT chat_id FROM polls WHERE poll_id=?",
+        (answer.poll_id,),
+    )
+    chat_id = poll_row[0] if poll_row else None
     await db_execute(
-        "INSERT INTO poll_votes (user_id, username, full_name, poll_id) VALUES (?,?,?,?)",
-        (answer.user.id, answer.user.username, answer.user.full_name, answer.poll_id),
+        "INSERT INTO poll_votes (chat_id, user_id, username, full_name, poll_id) VALUES (?,?,?,?,?)",
+        (chat_id, answer.user.id, answer.user.username, answer.user.full_name, answer.poll_id),
     )
 
 
@@ -208,29 +299,53 @@ async def cmd_help(msg: Message):
 
 @router.message(Command("stats"))
 async def cmd_stats(msg: Message):
+    if not is_group(msg):
+        return
     chat_id = msg.chat.id
 
+    # Парсим аргумент: /stats, /stats week, /stats month
+    args = (msg.text or "").split()
+    period = args[1].lower() if len(args) > 1 else "all"
+    if period not in ("all", "week", "month"):
+        period = "all"
+    pf, _ = period_filter(period)
+    period_label = {"all": "за всё время", "week": "за неделю", "month": "за месяц"}[period]
+
     rows_msg = await db_fetchall(
-        "SELECT user_id, username, full_name, COUNT(*) cnt FROM messages WHERE chat_id=? GROUP BY user_id ORDER BY cnt DESC LIMIT 15",
+        f"SELECT user_id, username, full_name, COUNT(*) cnt FROM messages WHERE chat_id=?{pf} GROUP BY user_id ORDER BY cnt DESC LIMIT 15",
         (chat_id,),
     )
 
-    rows_react = await db_fetchall(
-        "SELECT user_id, username, full_name, COUNT(*) cnt FROM reactions WHERE chat_id=? AND direction='given' GROUP BY user_id ORDER BY cnt DESC LIMIT 10",
+    rows_react_given = await db_fetchall(
+        f"SELECT user_id, username, full_name, COUNT(*) cnt FROM reactions WHERE chat_id=? AND direction='given'{pf} GROUP BY user_id ORDER BY cnt DESC LIMIT 10",
+        (chat_id,),
+    )
+
+    # Топ полученных реакций — джойним с messages, чтобы достать ник автора.
+    rows_react_recv = await db_fetchall(
+        f"""SELECT r.target_user_id,
+                  (SELECT username FROM messages m WHERE m.user_id=r.target_user_id AND m.chat_id=r.chat_id ORDER BY m.id DESC LIMIT 1) un,
+                  (SELECT full_name FROM messages m WHERE m.user_id=r.target_user_id AND m.chat_id=r.chat_id ORDER BY m.id DESC LIMIT 1) fn,
+                  COUNT(*) cnt
+            FROM reactions r
+            WHERE r.chat_id=? AND r.target_user_id IS NOT NULL{pf.replace('ts', 'r.ts')}
+            GROUP BY r.target_user_id
+            ORDER BY cnt DESC LIMIT 10""",
         (chat_id,),
     )
 
     rows_polls = await db_fetchall(
-        "SELECT user_id, username, full_name, COUNT(*) cnt FROM poll_votes GROUP BY user_id ORDER BY cnt DESC LIMIT 10",
+        f"SELECT user_id, username, full_name, COUNT(*) cnt FROM poll_votes WHERE chat_id=?{pf} GROUP BY user_id ORDER BY cnt DESC LIMIT 10",
+        (chat_id,),
     )
 
-    total_msg_row = await db_fetchone("SELECT COUNT(*) FROM messages WHERE chat_id=?", (chat_id,))
-    total_react_row = await db_fetchone("SELECT COUNT(*) FROM reactions WHERE chat_id=?", (chat_id,))
+    total_msg_row = await db_fetchone(f"SELECT COUNT(*) FROM messages WHERE chat_id=?{pf}", (chat_id,))
+    total_react_row = await db_fetchone(f"SELECT COUNT(*) FROM reactions WHERE chat_id=?{pf}", (chat_id,))
     total_msg = total_msg_row[0] if total_msg_row else 0
     total_react = total_react_row[0] if total_react_row else 0
 
     lines = [
-        "Активность чата\n",
+        f"Активность чата ({period_label})\n",
         f"Сообщений: {total_msg} | Реакций: {total_react}\n",
     ]
 
@@ -239,9 +354,14 @@ async def cmd_stats(msg: Message):
         for i, (uid, uname, fname, cnt) in enumerate(rows_msg, 1):
             lines.append(f"  {i}. {user_label(uid, uname, fname)} - {cnt}")
 
-    if rows_react:
-        lines.append("\nТоп по реакциям:")
-        for i, (uid, uname, fname, cnt) in enumerate(rows_react, 1):
+    if rows_react_given:
+        lines.append("\nТоп по поставленным реакциям:")
+        for i, (uid, uname, fname, cnt) in enumerate(rows_react_given, 1):
+            lines.append(f"  {i}. {user_label(uid, uname, fname)} - {cnt}")
+
+    if rows_react_recv:
+        lines.append("\nТоп по полученным реакциям:")
+        for i, (uid, uname, fname, cnt) in enumerate(rows_react_recv, 1):
             lines.append(f"  {i}. {user_label(uid, uname, fname)} - {cnt}")
 
     if rows_polls:
@@ -249,14 +369,17 @@ async def cmd_stats(msg: Message):
         for i, (uid, uname, fname, cnt) in enumerate(rows_polls, 1):
             lines.append(f"  {i}. {user_label(uid, uname, fname)} - {cnt}")
 
-    if not rows_msg and not rows_react:
+    if not rows_msg and not rows_react_given:
         lines.append("Пока нет данных.")
 
+    lines.append("\nИспользование: /stats [week|month]")
     await msg.answer("\n".join(lines))
 
 
 @router.message(Command("summary"))
 async def cmd_summary(msg: Message):
+    if not is_group(msg):
+        return
     if not groq_client:
         await msg.answer("GROQ_API_KEY не настроен.")
         return
