@@ -52,7 +52,11 @@ if USE_TURSO:
 async def db_connect():
     global _libsql_client
     if USE_TURSO and _libsql_client is None:
-        _libsql_client = libsql_client.create_client(url=TURSO_URL, auth_token=TURSO_TOKEN)
+        # libsql-client по умолчанию пытается ws/wss, но Turso стабильнее по HTTPS.
+        url = TURSO_URL
+        if url.startswith("libsql://"):
+            url = "https://" + url[len("libsql://"):]
+        _libsql_client = libsql_client.create_client(url=url, auth_token=TURSO_TOKEN)
 
 
 SCHEMA_STATEMENTS = [
