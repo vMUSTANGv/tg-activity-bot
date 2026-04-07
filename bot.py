@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import asyncio
 import sqlite3
@@ -127,28 +128,26 @@ async def on_poll_answer(answer: PollAnswer):
 
 @router.message(CommandStart())
 async def cmd_start(msg: Message):
-    text = (
-        "\U0001f44b <b>Activity Bot</b>\n\n"
-        "\U0001f4ca \u041e\u0442\u0441\u043b\u0435\u0436\u0438\u0432\u0430\u044e \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u044c \u0432 \u0447\u0430\u0442\u0435:\n"
-        "\u2022 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f\n"
-        "\u2022 \u0440\u0435\u0430\u043a\u0446\u0438\u0438 (\u043b\u0430\u0439\u043a\u0438)\n"
-        "\u2022 \u0433\u043e\u043b\u043e\u0441\u0430 \u0432 \u043e\u043f\u0440\u043e\u0441\u0430\u0445\n\n"
-        "/stats \u2014 \u0442\u043e\u043f \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u0438\n"
-        "/summary \u2014 \u0432\u044b\u0436\u0438\u043c\u043a\u0430 300 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439\n"
-        "/help \u2014 \u0441\u043f\u0440\u0430\u0432\u043a\u0430"
+    await msg.answer(
+        "Activity Bot\n\n"
+        "Отслеживаю активность в чате:\n"
+        "- сообщения\n"
+        "- реакции (лайки)\n"
+        "- голоса в опросах\n\n"
+        "/stats - топ активности\n"
+        "/summary - выжимка 300 сообщений\n"
+        "/help - справка"
     )
-    await msg.answer(text, parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("help"))
 async def cmd_help(msg: Message):
-    text = (
-        "<b>\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430:</b>\n\n"
-        "1. \u0414\u043e\u0431\u0430\u0432\u044c \u0431\u043e\u0442\u0430 \u0432 \u0433\u0440\u0443\u043f\u043f\u0443\n"
-        "2. \u041d\u0430\u0437\u043d\u0430\u0447\u044c \u0430\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440\u043e\u043c\n"
-        "3. @BotFather \u2192 Bot Settings \u2192 Group Privacy \u2192 <b>OFF</b>"
+    await msg.answer(
+        "Настройка:\n\n"
+        "1. Добавь бота в группу\n"
+        "2. Назначь администратором\n"
+        "3. @BotFather - Bot Settings - Group Privacy - OFF"
     )
-    await msg.answer(text, parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("stats"))
@@ -175,36 +174,35 @@ async def cmd_stats(msg: Message):
     con.close()
 
     lines = [
-        "\U0001f4ca <b>\u0410\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u044c \u0447\u0430\u0442\u0430</b>\n",
-        f"\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439: <b>{total_msg}</b>  \u2022  \u0420\u0435\u0430\u043a\u0446\u0438\u0439: <b>{total_react}</b>\n",
+        "Активность чата\n",
+        f"Сообщений: {total_msg} | Реакций: {total_react}\n",
     ]
 
     if rows_msg:
-        lines.append("<b>\U0001f4ac \u0422\u043e\u043f \u043f\u043e \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f\u043c:</b>")
+        lines.append("Топ по сообщениям:")
         for i, (uid, uname, fname, cnt) in enumerate(rows_msg, 1):
-            bar = "\u2588" * min(cnt * 10 // (rows_msg[0][3] or 1), 10)
-            lines.append(f"  {i}. {user_label(uid, uname, fname)} \u2014 <b>{cnt}</b>  {bar}")
+            lines.append(f"  {i}. {user_label(uid, uname, fname)} - {cnt}")
 
     if rows_react:
-        lines.append(f"\n<b>\u2764\ufe0f \u0422\u043e\u043f \u043f\u043e \u0440\u0435\u0430\u043a\u0446\u0438\u044f\u043c:</b>")
+        lines.append("\nТоп по реакциям:")
         for i, (uid, uname, fname, cnt) in enumerate(rows_react, 1):
-            lines.append(f"  {i}. {user_label(uid, uname, fname)} \u2014 {cnt}")
+            lines.append(f"  {i}. {user_label(uid, uname, fname)} - {cnt}")
 
     if rows_polls:
-        lines.append(f"\n<b>\U0001f4cb \u0422\u043e\u043f \u043f\u043e \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u0430\u043d\u0438\u044f\u043c:</b>")
+        lines.append("\nТоп по голосованиям:")
         for i, (uid, uname, fname, cnt) in enumerate(rows_polls, 1):
-            lines.append(f"  {i}. {user_label(uid, uname, fname)} \u2014 {cnt}")
+            lines.append(f"  {i}. {user_label(uid, uname, fname)} - {cnt}")
 
     if not rows_msg and not rows_react:
-        lines.append("\u041f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445.")
+        lines.append("Пока нет данных.")
 
-    await msg.answer("\n".join(lines), parse_mode=ParseMode.HTML)
+    await msg.answer("\n".join(lines))
 
 
 @router.message(Command("summary"))
 async def cmd_summary(msg: Message):
     if not gemini_client:
-        await msg.answer("\u26a0\ufe0f GEMINI_API_KEY \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d.")
+        await msg.answer("GEMINI_API_KEY не настроен.")
         return
 
     chat_id = msg.chat.id
@@ -216,31 +214,28 @@ async def cmd_summary(msg: Message):
     con.close()
 
     if len(rows) < 5:
-        await msg.answer("\u041c\u0430\u043b\u043e \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439 \u0434\u043b\u044f \u0441\u0430\u043c\u043c\u0430\u0440\u0438 (\u043d\u0443\u0436\u043d\u043e 5+).")
+        await msg.answer("Мало сообщений для саммари (нужно 5+).")
         return
 
     rows.reverse()
     chat_log = "\n".join(
-        f"[{ts}] {fname or uname or 'Anonim'}: {text}"
+        f"[{ts}] {fname or uname or 'Аноним'}: {text}"
         for fname, uname, text, ts in rows
     )
 
-    wait_msg = await msg.answer("\u23f3 \u0413\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u044e \u0432\u044b\u0436\u0438\u043c\u043a\u0443...")
+    wait_msg = await msg.answer("Генерирую выжимку...")
 
     try:
         response = await asyncio.to_thread(
             gemini_client.models.generate_content,
             model="gemini-2.0-flash-lite",
-            contents=f"\u0422\u044b \u043f\u043e\u043c\u043e\u0449\u043d\u0438\u043a \u0434\u043b\u044f \u043a\u0440\u0430\u0442\u043a\u0438\u0445 \u0432\u044b\u0436\u0438\u043c\u043e\u043a \u0433\u0440\u0443\u043f\u043f\u043e\u0432\u044b\u0445 \u0447\u0430\u0442\u043e\u0432.\n\n\u041b\u043e\u0433 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0445 {len(rows)} \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439:\n\n{chat_log}\n\n\u0421\u0434\u0435\u043b\u0430\u0439 \u0432\u044b\u0436\u0438\u043c\u043a\u0443 \u043d\u0430 \u0440\u0443\u0441\u0441\u043a\u043e\u043c:\n1. \u0413\u043b\u0430\u0432\u043d\u044b\u0435 \u0442\u0435\u043c\u044b\n2. \u0420\u0435\u0448\u0435\u043d\u0438\u044f / \u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0451\u043d\u043d\u043e\u0441\u0442\u0438\n3. \u0412\u0430\u0436\u043d\u044b\u0435 \u0441\u0441\u044b\u043b\u043a\u0438\n4. \u0410\u043a\u0442\u0438\u0432\u043d\u044b\u0435 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438\n\n\u041d\u0435 \u0431\u043e\u043b\u0435\u0435 500 \u0441\u043b\u043e\u0432.",
+            contents=f"Ты помощник для кратких выжимок групповых чатов.\n\nЛог последних {len(rows)} сообщений:\n\n{chat_log}\n\nСделай выжимку на русском:\n1. Главные темы\n2. Решения и договорённости\n3. Важные ссылки\n4. Активные участники\n\nНе более 500 слов.",
         )
-        text = (response.text or "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c.")[:4000]
-        await wait_msg.edit_text(
-            f"\U0001f4dd <b>\u0412\u044b\u0436\u0438\u043c\u043a\u0430 ({len(rows)} \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439):</b>\n\n{text}",
-            parse_mode=ParseMode.HTML,
-        )
+        text = (response.text or "Не удалось.")[:4000]
+        await wait_msg.edit_text(f"Выжимка ({len(rows)} сообщений):\n\n{text}")
     except Exception as e:
         log.exception("Gemini error")
-        await wait_msg.edit_text(f"\u274c \u041e\u0448\u0438\u0431\u043a\u0430: {e}")
+        await wait_msg.edit_text(f"Ошибка: {e}")
 
 
 async def on_startup(app_or_bot=None):
