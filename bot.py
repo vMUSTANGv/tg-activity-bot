@@ -424,7 +424,54 @@ async def on_chat_member(event: ChatMemberUpdated):
         )
 
 
-@router.message(~Command("stats", "summary", "start", "help", "silent", "digest", "menu"))
+async def is_chat_admin(chat_id: int, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in ("creator", "administrator")
+    except Exception:
+        return False
+
+
+@router.message(Command("all", "everyone"))
+async def cmd_all(msg: Message):
+    if not is_group(msg) or not msg.from_user:
+        return
+    if not await is_chat_admin(msg.chat.id, msg.from_user.id):
+        await msg.answer("🚫 Команда доступна только админам чата.", disable_notification=True)
+        return
+
+    # Текст-приписка (всё после команды)
+    parts = (msg.text or "").split(maxsplit=1)
+    note = parts[1].strip() if len(parts) > 1 else "Внимание!"
+
+    rows = await db_fetchall(
+        """SELECT user_id, username, full_name FROM chat_members
+           WHERE chat_id=? AND left_ts IS NULL""",
+        (msg.chat.id,),
+    )
+    if not rows:
+        await msg.answer("Пока некого звать — бот ещё не видел участников.")
+        return
+
+    def html_escape(s: str) -> str:
+        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    mentions = []
+    for uid, un, fn in rows:
+        name = html_escape(un or fn or f"id{uid}")
+        mentions.append(f'<a href="tg://user?id={uid}">{name}</a>')
+
+    # Telegram лимит ~4096 символов на сообщение и ~50 уникальных упоминаний
+    # на одно сообщение, чтоб уведомления реально доходили — режем по 50.
+    CHUNK = 50
+    header = f"📣 <b>{html_escape(note)}</b>\n\n"
+    chunks = [mentions[i:i+CHUNK] for i in range(0, len(mentions), CHUNK)]
+    for i, chunk in enumerate(chunks):
+        prefix = header if i == 0 else ""
+        await msg.answer(prefix + " ".join(chunk), parse_mode="HTML")
+
+
+@router.message(~Command("stats", "summary", "start", "help", "silent", "digest", "menu", "all", "everyone"))
 async def on_message(msg: Message):
     if not msg.from_user or not is_group(msg):
         return
@@ -687,6 +734,9 @@ HELP_TEXT = (
     "😴 /silent — кто давно не писал (по умолчанию 14+ дней)\n"
     "    └ <code>/silent 7</code> — за 7 дней\n"
     "    └ показывает в т.ч. вступивших, но молчащих\n\n"
+    "📣 /all — позвать всех участников (с пушем)\n"
+    "    └ <code>/all встречаемся в 19:00</code> — добавит подпись\n"
+    "    └ доступно только админам чата\n\n"
     "📋 /menu — кнопочное меню (для тех, кто не любит слэши)\n\n"
     "❓ /help — это сообщение\n\n"
     "━━━━━━━━━━━━━━━\n"
@@ -1033,6 +1083,7 @@ GROUP_COMMANDS = [
     BotCommand(command="digest",  description="🗞 Дайджест за неделю"),
     BotCommand(command="summary", description="📝 AI-выжимка чата"),
     BotCommand(command="silent",  description="😴 Кто давно молчит"),
+    BotCommand(command="all",     description="📣 Позвать всех (только админы)"),
     BotCommand(command="help",    description="❓ Справка"),
 ]
 
