@@ -1,16 +1,5 @@
 """
-Telegram Activity Bot (Render / Webhook version)
-─────────────────────────────────────────────────
-Tracks: messages, reactions, poll votes.
-/stats   — top active users
-/summary — AI summary via Gemini Flash
-
-Deploy: GitHub → Render (free Web Service)
-
-Environment variables (set in Render dashboard):
-    BOT_TOKEN      — from @BotFather
-    GEMINI_API_KEY — from https://aistudio.google.com/apikey
-    RENDER_URL     — your Render app URL, e.g. https://my-tg-bot.onrender.com
+Telegram Activity Bot (Render / Webhook)
 """
 
 import os
@@ -18,23 +7,20 @@ import asyncio
 import sqlite3
 import logging
 from typing import Optional
-from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher, Router
-from aiogram.types import (
-    Message, PollAnswer, MessageReactionUpdated, Update,
-)
+from aiogram.types import Message, PollAnswer, MessageReactionUpdated
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-import google.generativeai as genai
+from google import genai
 
 # ── Config ───────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-RENDER_URL = os.getenv("RENDER_URL", "")  # e.g. https://my-tg-bot.onrender.com
+RENDER_URL = os.getenv("RENDER_URL", "")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 DB_PATH = "activity.db"
 SUMMARY_MSG_COUNT = 300
@@ -43,8 +29,9 @@ PORT = int(os.getenv("PORT", "10000"))
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
+gemini_client = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ── Database ─────────────────────────────────────────────────────────
 def init_db():
@@ -219,7 +206,7 @@ async def cmd_stats(msg: Message):
 
 @router.message(Command("summary"))
 async def cmd_summary(msg: Message):
-    if not GEMINI_API_KEY:
+    if not gemini_client:
         await msg.answer("⚠️ GEMINI_API_KEY не настроен.")
         return
 
@@ -246,10 +233,10 @@ async def cmd_summary(msg: Message):
     wait_msg = await msg.answer("⏳ Генерирую выжимку...")
 
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
         response = await asyncio.to_thread(
-            model.generate_content,
-            f"""Ты — помощник для кратких выжимок групповых чатов.
+            gemini_client.models.generate_content,
+            model="gemini-2.0-flash",
+            contents=f"""Ты — помощник для кратких выжимок групповых чатов.
 
 Лог последних {len(rows)} сообщений:
 
@@ -273,7 +260,7 @@ async def cmd_summary(msg: Message):
         log.exception("Gemini error")
         await wait_msg.edit_text(f"❌ Ошибка: {e}")
 
-# ── Health check (keeps Render awake) ────────────────────────────────
+# ── Health check ─────────────────────────────────────────────────────
 async def health(request):
     return web.Response(text="OK")
 
@@ -305,6 +292,7 @@ def main():
     handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     handler.register(app, path=WEBHOOK_PATH)
 
+    log.info("Starting webhook server...")
     web.run_app(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
