@@ -270,10 +270,27 @@ async def db_fetchone(sql: str, params=()):
 
 # ---------- helpers ----------
 
+# Zero-width non-joiner ломает парсер упоминаний Telegram, но визуально незаметен:
+# участник видит @username как обычно, но не получает пуша.
+_ZWNJ = "\u200c"
+
+
 def user_label(user_id, username, full_name):
     if username:
-        return f"@{username}"
+        return f"@{_ZWNJ}{username}"
     return f"id:{user_id}"
+
+
+import re as _re
+
+_MENTION_RE = _re.compile(r"@(\w+)")
+
+
+def desensitize_mentions(text: str) -> str:
+    """Вставляет ZWNJ после @, чтобы упоминания не пинговали участников."""
+    if not text:
+        return text
+    return _MENTION_RE.sub(lambda m: f"@{_ZWNJ}{m.group(1)}", text)
 
 
 def is_group(msg: Message) -> bool:
@@ -876,7 +893,7 @@ async def cmd_digest(msg: Message):
                 ],
                 max_tokens=400,
             )
-            topics = (response.choices[0].message.content or "—").strip()
+            topics = desensitize_mentions((response.choices[0].message.content or "—").strip())
         except Exception as e:
             log.exception("Groq digest error")
             topics = f"_не удалось получить темы: {e}_"
@@ -904,7 +921,7 @@ async def cmd_digest(msg: Message):
         for i, (uid, un, fn, cnt) in enumerate(top_recv, 1):
             lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
 
-    await msg.answer("\n".join(lines), parse_mode="Markdown")
+    await msg.answer("\n".join(lines), parse_mode="Markdown", disable_notification=True)
 
 
 @router.message(Command("summary"))
@@ -969,9 +986,11 @@ async def cmd_summary(msg: Message):
             max_tokens=1500,
         )
         text = (response.choices[0].message.content or "Не удалось.")[:4000]
+        text = desensitize_mentions(text)
         await wait_msg.edit_text(
             f"📝 <b>Выжимка чата</b> ({len(rows)} сообщений)\n\n{text}",
             parse_mode="HTML",
+            disable_notification=True,
         )
     except Exception as e:
         log.exception("Groq error")
