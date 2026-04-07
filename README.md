@@ -15,18 +15,25 @@ Telegram-бот для учёта активности в группе: сооб
 | `BOT_TOKEN` | Токен бота от @BotFather |
 | `GROQ_API_KEY` | Ключ Groq для `/summary` |
 | `RENDER_URL` | Публичный URL сервиса (например `https://my-bot.onrender.com`) |
-| `DB_PATH` | Путь к SQLite-файлу. **На Render укажи `/var/data/activity.db`** |
+| `TURSO_DATABASE_URL` | URL базы Turso (`libsql://...turso.io`) |
+| `TURSO_AUTH_TOKEN` | Токен Turso (Full Access, без срока) |
 | `PORT` | Порт (Render задаёт сам, по умолчанию `10000`) |
 
-## Деплой на Render (с сохранением истории)
+Если `TURSO_DATABASE_URL` не задана, бот падает в локальный SQLite (`activity.db`) — удобно для разработки, но на бесплатном Render файл не переживёт рестарт.
 
-1. Создай Web Service из этого репо.
-2. **Disks → Add Disk**: mount path `/var/data`, размер от 1 GB.
-3. Environment: задай переменные выше, обязательно `DB_PATH=/var/data/activity.db`.
-4. Build: `pip install -r requirements.txt`
-5. Start: `python bot.py`
+## Деплой на Render (бесплатный план + Turso)
 
-Без persistent disk SQLite-файл стирается при каждом редеплое.
+1. Зарегистрируйся на https://turso.tech, создай БД, скопируй `Database URL` и сгенерируй `Auth Token` (Full Access, Never expires).
+2. На Render открой сервис → **Environment** → добавь:
+   - `BOT_TOKEN`
+   - `GROQ_API_KEY`
+   - `RENDER_URL` (например `https://tg-activity-bot.onrender.com`)
+   - `TURSO_DATABASE_URL`
+   - `TURSO_AUTH_TOKEN`
+3. Build: `pip install -r requirements.txt`
+4. Start: `python bot.py`
+
+История сообщений хранится в Turso и переживает любые рестарты/редеплои.
 
 ## Настройка бота в Telegram
 
