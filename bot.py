@@ -9,7 +9,7 @@ import httpx
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import (
     Message, PollAnswer, MessageReactionUpdated, CallbackQuery, ChatMemberUpdated,
-    BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats,
+    BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, BotCommandScopeChat,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
 from aiogram.filters import Command, CommandStart
@@ -475,6 +475,7 @@ async def cmd_all(msg: Message):
 async def on_message(msg: Message):
     if not msg.from_user or not is_group(msg):
         return
+    await ensure_chat_commands(msg.chat.id)
     await db_execute(
         "INSERT INTO messages (chat_id, message_id, user_id, username, full_name, text) VALUES (?,?,?,?,?,?)",
         (msg.chat.id, msg.message_id, msg.from_user.id, msg.from_user.username,
@@ -988,6 +989,19 @@ async def cmd_digest(msg: Message):
 
 
 _summary_last_call: dict[int, float] = {}
+_chat_commands_pushed: set[int] = set()
+
+
+async def ensure_chat_commands(chat_id: int):
+    """Один раз за время жизни процесса заталкиваем команды в конкретный чат,
+    чтобы сбросить агрессивный кэш Telegram-клиента."""
+    if chat_id in _chat_commands_pushed:
+        return
+    _chat_commands_pushed.add(chat_id)
+    try:
+        await bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeChat(chat_id=chat_id))
+    except Exception as e:
+        log.warning(f"set chat commands failed for {chat_id}: {e}")
 
 
 @router.message(Command("summary"))
