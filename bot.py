@@ -7,7 +7,7 @@ import logging
 
 import httpx
 from aiogram import Bot, Dispatcher, Router
-from aiogram.types import Message, PollAnswer, MessageReactionUpdated
+from aiogram.types import Message, PollAnswer, MessageReactionUpdated, BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats
 from aiogram.filters import Command, CommandStart
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
@@ -154,6 +154,13 @@ CREATE_TABLES = [
         chat_id INTEGER NOT NULL,
         ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""",
+    """CREATE TABLE IF NOT EXISTS achievements (
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        badge_key TEXT NOT NULL,
+        ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (chat_id, user_id, badge_key)
+    )""",
 ]
 
 CREATE_INDEXES = [
@@ -267,9 +274,42 @@ def period_filter(period: str):
     return "", ()
 
 
+# ---------- achievements ----------
+
+MSG_THRESHOLDS = [100, 500, 1000, 5000, 10000]
+REACT_GIVEN_THRESHOLDS = [50, 200, 1000]
+REACT_RECV_THRESHOLDS = [50, 200, 1000]
+POLL_THRESHOLDS = [10, 50, 200]
+
+BADGE_LABELS = {
+    "msg": "💬 {n} сообщений",
+    "react_given": "👍 {n} реакций поставлено",
+    "react_recv": "❤️ {n} реакций получено",
+    "poll": "🗳 {n} голосов в опросах",
+}
+
+
+async def check_and_award(chat_id: int, user_id: int, category: str, count: int, thresholds: list[int]):
+    """Если count точно совпадает с порогом — выдаёт бейдж (один раз). Возвращает текст бейджа или None."""
+    if count not in thresholds:
+        return None
+    badge_key = f"{category}_{count}"
+    existing = await db_fetchall(
+        "SELECT 1 FROM achievements WHERE chat_id=? AND user_id=? AND badge_key=?",
+        (chat_id, user_id, badge_key),
+    )
+    if existing:
+        return None
+    await db_execute(
+        "INSERT INTO achievements (chat_id, user_id, badge_key) VALUES (?,?,?)",
+        (chat_id, user_id, badge_key),
+    )
+    return BADGE_LABELS[category].format(n=count)
+
+
 # ---------- handlers ----------
 
-@router.message(~Command("stats", "summary", "start", "help"))
+@router.message(~Command("stats", "summary", "start", "help", "silent", "digest"))
 async def on_message(msg: Message):
     if not msg.from_user or not is_group(msg):
         return
@@ -283,6 +323,18 @@ async def on_message(msg: Message):
         await db_execute(
             "INSERT OR IGNORE INTO polls (poll_id, chat_id) VALUES (?,?)",
             (msg.poll.id, msg.chat.id),
+        )
+
+    # Проверка достижений по числу сообщений.
+    row = await db_fetchall(
+        "SELECT COUNT(*) FROM messages WHERE chat_id=? AND user_id=?",
+        (msg.chat.id, msg.from_user.id),
+    )
+    cnt = row[0][0] if row else 0
+    badge = await check_and_award(msg.chat.id, msg.from_user.id, "msg", cnt, MSG_THRESHOLDS)
+    if badge:
+        await msg.answer(
+            f"🎉 {user_label(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)} получает достижение: {badge}!"
         )
 
 
@@ -319,12 +371,50 @@ async def on_reaction(event: MessageReactionUpdated):
         )
 
     # Новые реакции — добавляем.
-    for emoji in new_emojis - old_emojis:
+    new_added = new_emojis - old_emojis
+    for emoji in new_added:
         await db_execute(
             "INSERT INTO reactions (chat_id, message_id, user_id, username, full_name, target_user_id, emoji, direction) VALUES (?,?,?,?,?,?,?,'given')",
             (event.chat.id, event.message_id, event.user.id, event.user.username,
              event.user.full_name, target_user_id, emoji),
         )
+
+    if not new_added:
+        return
+
+    # Достижение «поставлено реакций»
+    given_row = await db_fetchall(
+        "SELECT COUNT(*) FROM reactions WHERE chat_id=? AND user_id=?",
+        (event.chat.id, event.user.id),
+    )
+    given_cnt = given_row[0][0] if given_row else 0
+    badge = await check_and_award(event.chat.id, event.user.id, "react_given", given_cnt, REACT_GIVEN_THRESHOLDS)
+    if badge:
+        await bot.send_message(
+            event.chat.id,
+            f"🎉 {user_label(event.user.id, event.user.username, event.user.full_name)} получает достижение: {badge}!",
+        )
+
+    # Достижение «получено реакций» — для автора сообщения
+    if target_user_id:
+        recv_row = await db_fetchall(
+            "SELECT COUNT(*) FROM reactions WHERE chat_id=? AND target_user_id=?",
+            (event.chat.id, target_user_id),
+        )
+        recv_cnt = recv_row[0][0] if recv_row else 0
+        badge = await check_and_award(event.chat.id, target_user_id, "react_recv", recv_cnt, REACT_RECV_THRESHOLDS)
+        if badge:
+            # Подтянем username автора из messages
+            author = await db_fetchall(
+                "SELECT username, full_name FROM messages WHERE chat_id=? AND user_id=? ORDER BY id DESC LIMIT 1",
+                (event.chat.id, target_user_id),
+            )
+            uname = author[0][0] if author else None
+            fname = author[0][1] if author else None
+            await bot.send_message(
+                event.chat.id,
+                f"🎉 {user_label(target_user_id, uname, fname)} получает достижение: {badge}!",
+            )
 
 
 @router.poll_answer()
@@ -341,6 +431,20 @@ async def on_poll_answer(answer: PollAnswer):
         "INSERT INTO poll_votes (chat_id, user_id, username, full_name, poll_id) VALUES (?,?,?,?,?)",
         (chat_id, answer.user.id, answer.user.username, answer.user.full_name, answer.poll_id),
     )
+
+    if chat_id is None:
+        return
+    poll_row2 = await db_fetchall(
+        "SELECT COUNT(*) FROM poll_votes WHERE chat_id=? AND user_id=?",
+        (chat_id, answer.user.id),
+    )
+    poll_cnt = poll_row2[0][0] if poll_row2 else 0
+    badge = await check_and_award(chat_id, answer.user.id, "poll", poll_cnt, POLL_THRESHOLDS)
+    if badge:
+        await bot.send_message(
+            chat_id,
+            f"🎉 {user_label(answer.user.id, answer.user.username, answer.user.full_name)} получает достижение: {badge}!",
+        )
 
 
 @router.message(CommandStart())
@@ -446,6 +550,142 @@ async def cmd_stats(msg: Message):
     await msg.answer("\n".join(lines))
 
 
+@router.message(Command("silent"))
+async def cmd_silent(msg: Message):
+    if not is_group(msg):
+        return
+    args = (msg.text or "").split()
+    days = 14
+    if len(args) > 1 and args[1].isdigit():
+        days = max(1, min(int(args[1]), 365))
+
+    rows = await db_fetchall(
+        """SELECT user_id,
+                  (SELECT username FROM messages WHERE chat_id=? AND user_id=m.user_id ORDER BY id DESC LIMIT 1) un,
+                  (SELECT full_name FROM messages WHERE chat_id=? AND user_id=m.user_id ORDER BY id DESC LIMIT 1) fn,
+                  MAX(ts) last_ts,
+                  COUNT(*) total
+           FROM messages m
+           WHERE chat_id=?
+           GROUP BY user_id
+           HAVING MAX(ts) < datetime('now','-' || ? || ' days')
+           ORDER BY last_ts ASC
+           LIMIT 30""",
+        (msg.chat.id, msg.chat.id, msg.chat.id, days),
+    )
+
+    if not rows:
+        await msg.answer(f"😎 Молчунов за {days} дней нет — все на связи.")
+        return
+
+    lines = [f"😴 *Молчуны* (нет сообщений {days}+ дней)\n"]
+    for uid, uname, fname, last_ts, total in rows:
+        last_short = (last_ts or "")[:10]
+        lines.append(f"• {user_label(uid, uname, fname)} — последний раз {last_short} (всего: {total})")
+    lines.append(f"\n_Использование: /silent [дней]_")
+    await msg.answer("\n".join(lines), parse_mode="Markdown")
+
+
+@router.message(Command("digest"))
+async def cmd_digest(msg: Message):
+    if not is_group(msg):
+        return
+    chat_id = msg.chat.id
+
+    total_msgs_row = await db_fetchall(
+        "SELECT COUNT(*) FROM messages WHERE chat_id=? AND ts >= datetime('now','-7 days')",
+        (chat_id,),
+    )
+    total_react_row = await db_fetchall(
+        "SELECT COUNT(*) FROM reactions WHERE chat_id=? AND ts >= datetime('now','-7 days')",
+        (chat_id,),
+    )
+    total_polls_row = await db_fetchall(
+        "SELECT COUNT(*) FROM poll_votes WHERE chat_id=? AND ts >= datetime('now','-7 days')",
+        (chat_id,),
+    )
+    active_users_row = await db_fetchall(
+        "SELECT COUNT(DISTINCT user_id) FROM messages WHERE chat_id=? AND ts >= datetime('now','-7 days')",
+        (chat_id,),
+    )
+    total_msgs = total_msgs_row[0][0] if total_msgs_row else 0
+    total_react = total_react_row[0][0] if total_react_row else 0
+    total_polls = total_polls_row[0][0] if total_polls_row else 0
+    active_users = active_users_row[0][0] if active_users_row else 0
+
+    if total_msgs < 5:
+        await msg.answer("Слишком мало сообщений за неделю для дайджеста.")
+        return
+
+    top_msg = await db_fetchall(
+        "SELECT user_id, username, full_name, COUNT(*) cnt FROM messages WHERE chat_id=? AND ts >= datetime('now','-7 days') GROUP BY user_id ORDER BY cnt DESC LIMIT 3",
+        (chat_id,),
+    )
+    top_recv = await db_fetchall(
+        """SELECT r.target_user_id,
+                  (SELECT username FROM messages m WHERE m.user_id=r.target_user_id AND m.chat_id=r.chat_id ORDER BY m.id DESC LIMIT 1),
+                  (SELECT full_name FROM messages m WHERE m.user_id=r.target_user_id AND m.chat_id=r.chat_id ORDER BY m.id DESC LIMIT 1),
+                  COUNT(*) cnt
+           FROM reactions r
+           WHERE r.chat_id=? AND r.target_user_id IS NOT NULL AND r.ts >= datetime('now','-7 days')
+           GROUP BY r.target_user_id ORDER BY cnt DESC LIMIT 3""",
+        (chat_id,),
+    )
+
+    # Сообщения для AI-выжимки тем
+    log_rows = await db_fetchall(
+        "SELECT user_id, username, text FROM messages WHERE chat_id=? AND text!='' AND ts >= datetime('now','-7 days') ORDER BY id DESC LIMIT 400",
+        (chat_id,),
+    )
+    log_rows.reverse()
+    chat_log = "\n".join(
+        f"{('@' + un) if un else f'id:{uid}'}: {txt}"
+        for uid, un, txt in log_rows
+    )
+
+    topics = "—"
+    if groq_client and chat_log:
+        try:
+            response = await asyncio.to_thread(
+                groq_client.chat.completions.create,
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "Ты выделяешь главные темы недельного чата. Отвечай по-русски, очень кратко."},
+                    {"role": "user", "content": f"Лог за неделю:\n\n{chat_log}\n\nВыдели 3-5 главных тем недели маркированным списком. Каждая тема — одна строка с эмодзи в начале. Никаких пояснений, никаких имён, только темы."},
+                ],
+                max_tokens=400,
+            )
+            topics = (response.choices[0].message.content or "—").strip()
+        except Exception as e:
+            log.exception("Groq digest error")
+            topics = f"_не удалось получить темы: {e}_"
+
+    lines = [
+        "📊 *Дайджест за неделю*\n",
+        f"💬 Сообщений: *{total_msgs}*",
+        f"❤️ Реакций: *{total_react}*",
+        f"🗳 Голосов в опросах: *{total_polls}*",
+        f"👥 Активных участников: *{active_users}*",
+        "",
+        "🔥 *Главные темы:*",
+        topics,
+        "",
+    ]
+
+    if top_msg:
+        lines.append("🏆 *Топ авторов:*")
+        for i, (uid, un, fn, cnt) in enumerate(top_msg, 1):
+            lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
+        lines.append("")
+
+    if top_recv:
+        lines.append("❤️ *Топ по полученным реакциям:*")
+        for i, (uid, un, fn, cnt) in enumerate(top_recv, 1):
+            lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
+
+    await msg.answer("\n".join(lines), parse_mode="Markdown")
+
+
 @router.message(Command("summary"))
 async def cmd_summary(msg: Message):
     if not is_group(msg):
@@ -503,8 +743,24 @@ async def cmd_summary(msg: Message):
         await wait_msg.edit_text(f"Ошибка: {e}")
 
 
+GROUP_COMMANDS = [
+    BotCommand(command="stats",   description="📊 Топ активности (week|month)"),
+    BotCommand(command="digest",  description="🗞 Дайджест за неделю"),
+    BotCommand(command="summary", description="📝 AI-выжимка чата"),
+    BotCommand(command="silent",  description="😴 Кто давно молчит"),
+    BotCommand(command="help",    description="❓ Справка"),
+]
+
+PRIVATE_COMMANDS = [
+    BotCommand(command="start", description="🚀 Запустить бота"),
+    BotCommand(command="help",  description="❓ Справка"),
+]
+
+
 async def on_startup(app_or_bot=None):
     await init_db()
+    await bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
+    await bot.set_my_commands(PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())
     url = f"{RENDER_URL}{WEBHOOK_PATH}"
     await bot.set_webhook(url, allowed_updates=["message", "message_reaction", "poll_answer"])
     log.info(f"Webhook set: {url}")
