@@ -7,14 +7,13 @@ import logging
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message, PollAnswer, MessageReactionUpdated
 from aiogram.filters import Command, CommandStart
-from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-from google import genai
+from groq import Groq
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 RENDER_URL = os.getenv("RENDER_URL", "")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 DB_PATH = "activity.db"
@@ -24,9 +23,9 @@ PORT = int(os.getenv("PORT", "10000"))
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-gemini_client = None
-if GEMINI_API_KEY:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+groq_client = None
+if GROQ_API_KEY:
+    groq_client = Groq(api_key=GROQ_API_KEY)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -201,8 +200,8 @@ async def cmd_stats(msg: Message):
 
 @router.message(Command("summary"))
 async def cmd_summary(msg: Message):
-    if not gemini_client:
-        await msg.answer("GEMINI_API_KEY не настроен.")
+    if not groq_client:
+        await msg.answer("GROQ_API_KEY не настроен.")
         return
 
     chat_id = msg.chat.id
@@ -227,14 +226,18 @@ async def cmd_summary(msg: Message):
 
     try:
         response = await asyncio.to_thread(
-            gemini_client.models.generate_content,
-            model="gemini-2.0-flash-lite",
-            contents=f"Ты помощник для кратких выжимок групповых чатов.\n\nЛог последних {len(rows)} сообщений:\n\n{chat_log}\n\nСделай выжимку на русском:\n1. Главные темы\n2. Решения и договорённости\n3. Важные ссылки\n4. Активные участники\n\nНе более 500 слов.",
+            groq_client.chat.completions.create,
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "Ты помощник для кратких выжимок групповых чатов. Отвечай на русском языке."},
+                {"role": "user", "content": f"Лог последних {len(rows)} сообщений:\n\n{chat_log}\n\nСделай выжимку:\n1. Главные темы\n2. Решения и договорённости\n3. Важные ссылки\n4. Активные участники\n\nНе более 500 слов."},
+            ],
+            max_tokens=2000,
         )
-        text = (response.text or "Не удалось.")[:4000]
+        text = (response.choices[0].message.content or "Не удалось.")[:4000]
         await wait_msg.edit_text(f"Выжимка ({len(rows)} сообщений):\n\n{text}")
     except Exception as e:
-        log.exception("Gemini error")
+        log.exception("Groq error")
         await wait_msg.edit_text(f"Ошибка: {e}")
 
 
