@@ -1095,13 +1095,9 @@ async def cmd_summary(msg: Message):
 
 
 GROUP_COMMANDS = [
-    BotCommand(command="menu",    description="📋 Меню бота"),
-    BotCommand(command="stats",   description="📊 Топ активности (week|month)"),
-    BotCommand(command="digest",  description="🗞 Дайджест за неделю"),
-    BotCommand(command="summary", description="📝 AI-выжимка чата"),
-    BotCommand(command="silent",  description="😴 Кто давно молчит"),
-    BotCommand(command="all",     description="📣 Позвать всех (только админы)"),
-    BotCommand(command="help",    description="❓ Справка"),
+    BotCommand(command="menu",    description="📋 Открыть меню"),
+    BotCommand(command="summary", description="📝 Пересказать чат"),
+    BotCommand(command="all",     description="📣 Позвать всех (админы)"),
 ]
 
 PRIVATE_COMMANDS = [
