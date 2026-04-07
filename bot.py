@@ -233,9 +233,9 @@ async def cmd_summary(msg: Message):
         await wait_msg.edit_text(f"Oshibka: {e}")
 
 
-async def on_startup(b: Bot):
+async def on_startup(app_or_bot=None):
     url = f"{RENDER_URL}{WEBHOOK_PATH}"
-    await b.set_webhook(url, allowed_updates=["message", "message_reaction", "poll_answer"])
+    await bot.set_webhook(url, allowed_updates=["message", "message_reaction", "poll_answer"])
     log.info(f"Webhook set: {url}")
 
 
