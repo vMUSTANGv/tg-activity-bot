@@ -456,7 +456,7 @@ async def cmd_summary(msg: Message):
 
     chat_id = msg.chat.id
     rows = await db_fetchall(
-        "SELECT full_name, username, text, ts FROM messages WHERE chat_id=? AND text!='' ORDER BY id DESC LIMIT ?",
+        "SELECT user_id, username, text, ts FROM messages WHERE chat_id=? AND text!='' ORDER BY id DESC LIMIT ?",
         (chat_id, SUMMARY_MSG_COUNT),
     )
 
@@ -466,8 +466,8 @@ async def cmd_summary(msg: Message):
 
     rows.reverse()
     chat_log = "\n".join(
-        f"[{ts}] {fname or uname or 'Аноним'}: {text}"
-        for fname, uname, text, ts in rows
+        f"[{ts}] {('@' + uname) if uname else f'id:{uid}'}: {text}"
+        for uid, uname, text, ts in rows
     )
 
     wait_msg = await msg.answer("Генерирую выжимку...")
@@ -477,8 +477,8 @@ async def cmd_summary(msg: Message):
             groq_client.chat.completions.create,
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "Ты помощник для кратких выжимок групповых чатов. Отвечай на русском языке."},
-                {"role": "user", "content": f"Лог последних {len(rows)} сообщений:\n\n{chat_log}\n\nСделай выжимку:\n1. Главные темы\n2. Решения и договорённости\n3. Важные ссылки\n4. Активные участники\n\nНе более 500 слов."},
+                {"role": "system", "content": "Ты помощник для кратких выжимок групповых чатов. Отвечай на русском языке. Когда упоминаешь участников — используй их Telegram-ники в формате @username (как они указаны в логе). Никогда не используй имена и фамилии."},
+                {"role": "user", "content": f"Лог последних {len(rows)} сообщений (участники указаны как @username):\n\n{chat_log}\n\nСделай выжимку:\n1. Главные темы\n2. Решения и договорённости\n3. Важные ссылки\n4. Активные участники (только @username)\n\nНе более 500 слов."},
             ],
             max_tokens=2000,
         )
