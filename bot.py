@@ -346,15 +346,18 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📊 Статистика", callback_data="stats:all"),
-            InlineKeyboardButton(text="🗞 Дайджест недели", callback_data="digest"),
+            InlineKeyboardButton(text="🗞 Дайджест", callback_data="digest"),
+        ],
+        [
+            InlineKeyboardButton(text="📅 За неделю", callback_data="stats:week"),
+            InlineKeyboardButton(text="🗓 За месяц", callback_data="stats:month"),
         ],
         [
             InlineKeyboardButton(text="📝 AI-выжимка", callback_data="summary"),
-            InlineKeyboardButton(text="😴 Молчуны", callback_data="silent:14"),
         ],
         [
-            InlineKeyboardButton(text="📅 Неделя", callback_data="stats:week"),
-            InlineKeyboardButton(text="🗓 Месяц", callback_data="stats:month"),
+            InlineKeyboardButton(text="😴 Молчуны 14д", callback_data="silent:14"),
+            InlineKeyboardButton(text="😴 Молчуны 7д", callback_data="silent:7"),
         ],
         [
             InlineKeyboardButton(text="❓ Помощь", callback_data="help"),
