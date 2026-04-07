@@ -759,6 +759,8 @@ PRIVATE_COMMANDS = [
 
 async def on_startup(app_or_bot=None):
     await init_db()
+    await bot.delete_my_commands()
+    await bot.set_my_commands(GROUP_COMMANDS)  # default scope
     await bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
     await bot.set_my_commands(PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())
     url = f"{RENDER_URL}{WEBHOOK_PATH}"
