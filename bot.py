@@ -1001,6 +1001,7 @@ async def cmd_silent(msg: Message):
     if len(args) > 1 and args[1].isdigit():
         days = max(1, min(int(args[1]), 365))
     await msg.answer(await _render_silent(msg.chat.id, days), parse_mode="Markdown")
+    await try_delete(msg.chat.id, msg.message_id)
 
 
 @router.message(Command("digest"))
@@ -1097,6 +1098,7 @@ async def cmd_digest(msg: Message):
             lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
 
     await msg.answer("\n".join(lines), parse_mode="Markdown", disable_notification=True)
+    await try_delete(msg.chat.id, msg.message_id)
 
 
 _summary_last_call: dict[int, float] = {}
