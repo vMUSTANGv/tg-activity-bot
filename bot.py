@@ -505,6 +505,34 @@ async def on_edited_message(msg: Message):
     )
 
 
+@router.message(Command("chats"))
+async def cmd_chats(msg: Message):
+    """Список всех чатов где бот видел сообщения. Только для админа."""
+    if not msg.from_user or (ADMIN_USER_ID and msg.from_user.id != ADMIN_USER_ID):
+        return
+    rows = await db_fetchall(
+        """SELECT chat_id, COUNT(*) cnt, MAX(ts) last_ts, COUNT(DISTINCT user_id) users
+           FROM messages
+           GROUP BY chat_id
+           ORDER BY cnt DESC""",
+    )
+    if not rows:
+        await msg.answer("В БД нет ни одного чата.", disable_notification=True)
+        return
+    lines = ["📋 <b>Все чаты бота</b>\n"]
+    for chat_id, cnt, last_ts, users in rows:
+        in_wl = "✅" if is_allowed_chat(chat_id) else "⚠️"
+        last_short = (last_ts or "")[:16]
+        lines.append(f"{in_wl} <code>{chat_id}</code> — {cnt} сообщ., {users} чел., посл.: {last_short}")
+    lines.append(f"\nВсего чатов: <b>{len(rows)}</b>")
+    if ALLOWED_CHAT_IDS:
+        lines.append(f"В whitelist: {len(ALLOWED_CHAT_IDS)}")
+    else:
+        lines.append("⚠️ <b>Whitelist пуст — бот работает во всех чатах.</b>")
+    await msg.answer("\n".join(lines), parse_mode="HTML", disable_notification=True)
+    await try_delete(msg.chat.id, msg.message_id)
+
+
 @router.message(Command("chatid"))
 async def cmd_chatid(msg: Message):
     """Показывает chat_id текущего чата (для добавления в ALLOWED_CHAT_IDS).
@@ -622,7 +650,7 @@ async def cmd_all(msg: Message):
     await try_delete(msg.chat.id, msg.message_id)
 
 
-@router.message(~Command("stats", "summary", "start", "help", "silent", "digest", "menu", "all", "everyone", "chatid"))
+@router.message(~Command("stats", "summary", "start", "help", "silent", "digest", "menu", "all", "everyone", "chatid", "chats"))
 async def on_message(msg: Message):
     if not msg.from_user or not is_group(msg):
         return
