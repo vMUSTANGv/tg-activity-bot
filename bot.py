@@ -22,6 +22,16 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or "0")
+_raw_allowed = os.getenv("ALLOWED_CHAT_IDS", "").strip()
+ALLOWED_CHAT_IDS: set[int] = set()
+if _raw_allowed:
+    for x in _raw_allowed.replace(";", ",").split(","):
+        x = x.strip()
+        if x:
+            try:
+                ALLOWED_CHAT_IDS.add(int(x))
+            except ValueError:
+                pass
 RENDER_URL = os.getenv("RENDER_URL", "")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 
@@ -386,8 +396,16 @@ def sanitize_telegram_html(text: str) -> str:
     return text.strip()
 
 
+def is_allowed_chat(chat_id: int) -> bool:
+    """Если whitelist не задан — разрешаем все чаты. Иначе только из списка."""
+    if not ALLOWED_CHAT_IDS:
+        return True
+    return chat_id in ALLOWED_CHAT_IDS
+
+
 def is_group(msg: Message) -> bool:
-    return msg.chat.type in ("group", "supergroup")
+    """Чат должен быть группой И входить в whitelist (если он задан)."""
+    return msg.chat.type in ("group", "supergroup") and is_allowed_chat(msg.chat.id)
 
 
 def period_filter(period: str):
@@ -487,10 +505,28 @@ async def on_edited_message(msg: Message):
     )
 
 
+@router.message(Command("chatid"))
+async def cmd_chatid(msg: Message):
+    """Показывает chat_id текущего чата (для добавления в ALLOWED_CHAT_IDS).
+    Доступна только админу из ADMIN_USER_ID, чтобы левые юзеры не светили id."""
+    if not msg.from_user or (ADMIN_USER_ID and msg.from_user.id != ADMIN_USER_ID):
+        return
+    await msg.answer(
+        f"<code>chat_id = {msg.chat.id}</code>\n"
+        f"тип: {msg.chat.type}\n"
+        f"в whitelist: {'да' if is_allowed_chat(msg.chat.id) else 'нет'}",
+        parse_mode="HTML",
+        disable_notification=True,
+    )
+    await try_delete(msg.chat.id, msg.message_id)
+
+
 @router.chat_member()
 async def on_chat_member(event: ChatMemberUpdated):
     """Отслеживает входы/выходы участников группы."""
     if event.chat.type not in ("group", "supergroup"):
+        return
+    if not is_allowed_chat(event.chat.id):
         return
     member = event.new_chat_member
     user = member.user
@@ -586,7 +622,7 @@ async def cmd_all(msg: Message):
     await try_delete(msg.chat.id, msg.message_id)
 
 
-@router.message(~Command("stats", "summary", "start", "help", "silent", "digest", "menu", "all", "everyone"))
+@router.message(~Command("stats", "summary", "start", "help", "silent", "digest", "menu", "all", "everyone", "chatid"))
 async def on_message(msg: Message):
     if not msg.from_user or not is_group(msg):
         return
