@@ -52,7 +52,8 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0
 
 
 async def llm_complete(system: str, user: str, max_tokens: int = 1500) -> str:
-    """Универсальная функция вызова LLM. Сначала пробует Gemini, при ошибке падает на Groq."""
+    """Универсальная функция вызова LLM. Сначала пробует Gemini, при ошибке падает на Groq.
+    На фолбэке Groq автоматически обрезает входной prompt, чтобы влезть в 6k TPM лимит."""
     if GEMINI_API_KEY:
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -83,14 +84,23 @@ async def llm_complete(system: str, user: str, max_tokens: int = 1500) -> str:
     if not groq_client:
         raise RuntimeError("Нет доступного LLM (ни GEMINI_API_KEY, ни GROQ_API_KEY).")
 
+    # Groq llama-3.1-8b-instant free tier = 6k TPM. Считаем грубо 1 токен ≈ 3.5 символа.
+    # Оставляем место под system (~500 ток) и output (max_tokens), берём ~3500 токенов на user → ~12000 символов.
+    GROQ_USER_CHAR_BUDGET = 12000
+    if len(user) > GROQ_USER_CHAR_BUDGET:
+        # Берём последний кусок — последние сообщения важнее старых
+        user_compact = "[лог обрезан до самых свежих сообщений из-за лимита фолбэка]\n\n" + user[-GROQ_USER_CHAR_BUDGET:]
+    else:
+        user_compact = user
+
     response = await asyncio.to_thread(
         groq_client.chat.completions.create,
         model="llama-3.1-8b-instant",
         messages=[
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": user_compact},
         ],
-        max_tokens=max_tokens,
+        max_tokens=min(max_tokens, 1000),
     )
     return (response.choices[0].message.content or "").strip()
 
