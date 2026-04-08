@@ -32,8 +32,8 @@ DB_PATH = os.getenv("DB_PATH", "activity.db")
 
 USE_TURSO = bool(TURSO_URL)
 
-SUMMARY_MSG_COUNT = 120
-SUMMARY_MAX_TEXT_LEN = 220
+SUMMARY_MSG_COUNT = 100
+SUMMARY_MAX_TEXT_LEN = 180
 SUMMARY_COOLDOWN_SEC = 5 * 60
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -57,7 +57,7 @@ async def llm_complete(system: str, user: str, max_tokens: int = 1500) -> str:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
                     GEMINI_URL,
-                    params={"key": GEMINI_API_KEY},
+                    headers={"x-goog-api-key": GEMINI_API_KEY},
                     json={
                         "systemInstruction": {"parts": [{"text": system}]},
                         "contents": [{"role": "user", "parts": [{"text": user}]}],
@@ -508,6 +508,33 @@ async def on_chat_member(event: ChatMemberUpdated):
         )
 
 
+async def try_delete(chat_id: int, message_id: int):
+    """Лучшее усилие удалить сообщение. Молча игнорим если у бота нет прав."""
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
+
+async def notify_user_privately(user_id: int, text: str, fallback_chat_id: int | None = None):
+    """Шлём личное сообщение пользователю. Если личка закрыта — кратко в групповой чат."""
+    try:
+        await bot.send_message(user_id, text, parse_mode="HTML", disable_notification=True)
+        return True
+    except Exception as e:
+        log.warning(f"DM to {user_id} failed: {e}")
+        if fallback_chat_id is not None:
+            try:
+                await bot.send_message(
+                    fallback_chat_id,
+                    "⚠️ Не смог отправить вам личное сообщение. Напишите боту в личку /start, чтобы получать ошибки приватно.",
+                    disable_notification=True,
+                )
+            except Exception:
+                pass
+        return False
+
+
 async def is_chat_admin(chat_id: int, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id, user_id)
@@ -553,6 +580,7 @@ async def cmd_all(msg: Message):
     for i, chunk in enumerate(chunks):
         prefix = header if i == 0 else ""
         await msg.answer(prefix + " ".join(chunk), parse_mode="HTML")
+    await try_delete(msg.chat.id, msg.message_id)
 
 
 @router.message(~Command("stats", "summary", "start", "help", "silent", "digest", "menu", "all", "everyone"))
@@ -710,6 +738,7 @@ async def cmd_start(msg: Message):
 @router.message(Command("menu"))
 async def cmd_menu(msg: Message):
     await msg.answer("📋 *Меню бота*", reply_markup=main_menu_kb(), parse_mode="Markdown")
+    await try_delete(msg.chat.id, msg.message_id)
 
 
 # ---------- callback handlers ----------
@@ -847,6 +876,7 @@ HELP_TEXT = (
 @router.message(Command("help"))
 async def cmd_help(msg: Message):
     await msg.answer(HELP_TEXT, parse_mode="HTML", disable_web_page_preview=True)
+    await try_delete(msg.chat.id, msg.message_id)
 
 
 @router.message(Command("stats"))
@@ -926,6 +956,7 @@ async def cmd_stats(msg: Message):
 
     lines.append("\nИспользование: /stats [week|month]")
     await msg.answer("\n".join(lines))
+    await try_delete(msg.chat.id, msg.message_id)
 
 
 async def _render_silent(chat_id: int, days: int) -> str:
@@ -1160,9 +1191,17 @@ async def cmd_summary(msg: Message):
             parse_mode="HTML",
             disable_notification=True,
         )
+        await try_delete(msg.chat.id, msg.message_id)
     except Exception as e:
         log.exception("LLM error")
-        await wait_msg.edit_text(f"Ошибка: {e}")
+        # Удаляем сообщение «генерирую…» из чата, ошибку в личку юзеру
+        await try_delete(msg.chat.id, wait_msg.message_id)
+        await try_delete(msg.chat.id, msg.message_id)
+        await notify_user_privately(
+            msg.from_user.id,
+            f"⚠️ <b>Ошибка /summary</b>\n\n<code>{str(e)[:1000]}</code>",
+            fallback_chat_id=msg.chat.id,
+        )
 
 
 GROUP_COMMANDS = [
