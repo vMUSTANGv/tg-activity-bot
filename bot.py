@@ -21,6 +21,7 @@ from groq import Groq
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or "0")
 RENDER_URL = os.getenv("RENDER_URL", "")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 
@@ -516,23 +517,15 @@ async def try_delete(chat_id: int, message_id: int):
         pass
 
 
-async def notify_user_privately(user_id: int, text: str, fallback_chat_id: int | None = None):
-    """Шлём личное сообщение пользователю. Если личка закрыта — кратко в групповой чат."""
+async def notify_admin(text: str):
+    """Шлёт сообщение об ошибке только админу из ADMIN_USER_ID. Если не задан — пишет в лог."""
+    if not ADMIN_USER_ID:
+        log.error(f"[admin notify, no ADMIN_USER_ID set] {text}")
+        return
     try:
-        await bot.send_message(user_id, text, parse_mode="HTML", disable_notification=True)
-        return True
+        await bot.send_message(ADMIN_USER_ID, text, parse_mode="HTML", disable_notification=True)
     except Exception as e:
-        log.warning(f"DM to {user_id} failed: {e}")
-        if fallback_chat_id is not None:
-            try:
-                await bot.send_message(
-                    fallback_chat_id,
-                    "⚠️ Не смог отправить вам личное сообщение. Напишите боту в личку /start, чтобы получать ошибки приватно.",
-                    disable_notification=True,
-                )
-            except Exception:
-                pass
-        return False
+        log.warning(f"Admin DM to {ADMIN_USER_ID} failed: {e}")
 
 
 async def is_chat_admin(chat_id: int, user_id: int) -> bool:
@@ -1196,13 +1189,11 @@ async def cmd_summary(msg: Message):
         await try_delete(msg.chat.id, msg.message_id)
     except Exception as e:
         log.exception("LLM error")
-        # Удаляем сообщение «генерирую…» из чата, ошибку в личку юзеру
+        # Чистим следы из чата, ошибку — в личку админу
         await try_delete(msg.chat.id, wait_msg.message_id)
         await try_delete(msg.chat.id, msg.message_id)
-        await notify_user_privately(
-            msg.from_user.id,
-            f"⚠️ <b>Ошибка /summary</b>\n\n<code>{str(e)[:1000]}</code>",
-            fallback_chat_id=msg.chat.id,
+        await notify_admin(
+            f"⚠️ <b>Ошибка /summary в чате</b> <code>{msg.chat.id}</code>\n\n<code>{str(e)[:1500]}</code>"
         )
 
 
