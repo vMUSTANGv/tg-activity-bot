@@ -20,6 +20,7 @@ from groq import Groq
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 RENDER_URL = os.getenv("RENDER_URL", "")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 
@@ -42,6 +43,55 @@ log = logging.getLogger(__name__)
 groq_client = None
 if GROQ_API_KEY:
     groq_client = Groq(api_key=GROQ_API_KEY)
+
+
+# ---------- LLM провайдеры ----------
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
+
+async def llm_complete(system: str, user: str, max_tokens: int = 1500) -> str:
+    """Универсальная функция вызова LLM. Сначала пробует Gemini, при ошибке падает на Groq."""
+    if GEMINI_API_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    GEMINI_URL,
+                    params={"key": GEMINI_API_KEY},
+                    json={
+                        "systemInstruction": {"parts": [{"text": system}]},
+                        "contents": [{"role": "user", "parts": [{"text": user}]}],
+                        "generationConfig": {
+                            "maxOutputTokens": max_tokens,
+                            "temperature": 0.7,
+                        },
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                cands = data.get("candidates", [])
+                if cands:
+                    parts = cands[0].get("content", {}).get("parts", [])
+                    text = "".join(p.get("text", "") for p in parts).strip()
+                    if text:
+                        return text
+                log.warning(f"Gemini returned empty: {data}")
+        except Exception as e:
+            log.warning(f"Gemini failed, falling back to Groq: {e}")
+
+    if not groq_client:
+        raise RuntimeError("Нет доступного LLM (ни GEMINI_API_KEY, ни GROQ_API_KEY).")
+
+    response = await asyncio.to_thread(
+        groq_client.chat.completions.create,
+        model="llama-3.1-8b-instant",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        max_tokens=max_tokens,
+    )
+    return (response.choices[0].message.content or "").strip()
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -950,20 +1000,16 @@ async def cmd_digest(msg: Message):
     )
 
     topics = "—"
-    if groq_client and chat_log:
+    if (GEMINI_API_KEY or groq_client) and chat_log:
         try:
-            response = await asyncio.to_thread(
-                groq_client.chat.completions.create,
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "Ты выделяешь главные темы недельного чата. Отвечай по-русски, очень кратко."},
-                    {"role": "user", "content": f"Лог за неделю:\n\n{chat_log}\n\nВыдели 3-5 главных тем недели маркированным списком. Каждая тема — одна строка с эмодзи в начале. Никаких пояснений, никаких имён, только темы."},
-                ],
+            topics_raw = await llm_complete(
+                "Ты выделяешь главные темы недельного чата. Отвечай по-русски, очень кратко.",
+                f"Лог за неделю:\n\n{chat_log}\n\nВыдели 3-5 главных тем недели маркированным списком. Каждая тема — одна строка с эмодзи в начале. Никаких пояснений, никаких имён, только темы.",
                 max_tokens=400,
             )
-            topics = desensitize_mentions((response.choices[0].message.content or "—").strip())
+            topics = desensitize_mentions(topics_raw or "—")
         except Exception as e:
-            log.exception("Groq digest error")
+            log.exception("LLM digest error")
             topics = f"_не удалось получить темы: {e}_"
 
     lines = [
@@ -1026,8 +1072,8 @@ async def cmd_summary(msg: Message):
         return
     _summary_last_call[msg.chat.id] = now
 
-    if not groq_client:
-        await msg.answer("GROQ_API_KEY не настроен.")
+    if not GEMINI_API_KEY and not groq_client:
+        await msg.answer("LLM не настроен (нужен GEMINI_API_KEY или GROQ_API_KEY).")
         return
 
     chat_id = msg.chat.id
@@ -1048,50 +1094,43 @@ async def cmd_summary(msg: Message):
 
     wait_msg = await msg.answer("Генерирую выжимку...")
 
+    system = (
+        "Ты делаешь конкретные, фактические выжимки групповых Telegram-чатов на русском. "
+        "Главное правило: только конкретика — имена мест, даты, цены, цитаты, договорённости. "
+        "Никакой воды и общих фраз вроде «обсуждали разное» или «делились мнениями». "
+        "Если информация расплывчатая — лучше пропусти раздел, чем пиши пустоту. "
+        "Участников упоминай только как @username (как в логе). Имена и фамилии запрещены. "
+        "Используй эмодзи для заголовков, но не злоупотребляй ими в тексте."
+    )
+    user_prompt = (
+        f"Вот лог последних {len(rows)} сообщений группового чата (участники указаны как @username):\n\n{chat_log}\n\n"
+        "Сделай выжимку строго в этом формате (HTML-теги для форматирования):\n\n"
+        "💬 <b>О чём говорили</b>\n"
+        "Несколько маркированных пунктов. Каждый пункт — конкретная тема в 1-2 предложениях, с фактами: что именно обсуждали, какие предложения звучали, кто что сказал интересного. Если уместно — короткая цитата в кавычках (до 10 слов).\n\n"
+        "✅ <b>Договорённости и решения</b>\n"
+        "Только если реально что-то решили: дата, место, время, действие. Если нет — пиши «—».\n\n"
+        "📅 <b>Планы и предложения</b>\n"
+        "Конкретные предложения встретиться, сходить, обсудить — кто предложил, что именно. Если нет — пиши «—».\n\n"
+        "🔗 <b>Полезные ссылки</b>\n"
+        "Только реально полезные ресурсы из сообщений (не картинки). Если нет — пиши «—».\n\n"
+        "👥 <b>Кто отметился</b>\n"
+        "Список 3-7 самых активных: @username — одна конкретная фраза о его вкладе (что предложил, чем шутил, какую тему поднял). Никакой воды типа «активно участвовал».\n\n"
+        "Жёсткие правила:\n"
+        "— Каждый пункт должен содержать фактическую информацию из лога, а не общие слова.\n"
+        "— Если в логе только мемы и шутки — так и пиши «обменивались мемами и шутками на тему X».\n"
+        "— Не более 500 слов.\n"
+        "— Никаких имён, только @username."
+    )
     try:
-        response = await asyncio.to_thread(
-            groq_client.chat.completions.create,
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": (
-                    "Ты делаешь конкретные, фактические выжимки групповых Telegram-чатов на русском. "
-                    "Главное правило: только конкретика — имена мест, даты, цены, цитаты, договорённости. "
-                    "Никакой воды и общих фраз вроде «обсуждали разное» или «делились мнениями». "
-                    "Если информация расплывчатая — лучше пропусти раздел, чем пиши пустоту. "
-                    "Участников упоминай только как @username (как в логе). Имена и фамилии запрещены. "
-                    "Используй эмодзи для заголовков, но не злоупотребляй ими в тексте."
-                )},
-                {"role": "user", "content": (
-                    f"Вот лог последних {len(rows)} сообщений группового чата (участники указаны как @username):\n\n{chat_log}\n\n"
-                    "Сделай выжимку строго в этом формате (HTML-теги для форматирования):\n\n"
-                    "💬 <b>О чём говорили</b>\n"
-                    "Несколько маркированных пунктов. Каждый пункт — конкретная тема в 1-2 предложениях, с фактами: что именно обсуждали, какие предложения звучали, кто что сказал интересного. Если уместно — короткая цитата в кавычках (до 10 слов).\n\n"
-                    "✅ <b>Договорённости и решения</b>\n"
-                    "Только если реально что-то решили: дата, место, время, действие. Если нет — пиши «—».\n\n"
-                    "📅 <b>Планы и предложения</b>\n"
-                    "Конкретные предложения встретиться, сходить, обсудить — кто предложил, что именно. Если нет — пиши «—».\n\n"
-                    "🔗 <b>Полезные ссылки</b>\n"
-                    "Только реально полезные ресурсы из сообщений (не картинки). Если нет — пиши «—».\n\n"
-                    "👥 <b>Кто отметился</b>\n"
-                    "Список 3-7 самых активных: @username — одна конкретная фраза о его вкладе (что предложил, чем шутил, какую тему поднял). Никакой воды типа «активно участвовал».\n\n"
-                    "Жёсткие правила:\n"
-                    "— Каждый пункт должен содержать фактическую информацию из лога, а не общие слова.\n"
-                    "— Если в логе только мемы и шутки — так и пиши «обменивались мемами и шутками на тему X».\n"
-                    "— Не более 500 слов.\n"
-                    "— Никаких имён, только @username."
-                )},
-            ],
-            max_tokens=1500,
-        )
-        text = (response.choices[0].message.content or "Не удалось.")[:4000]
-        text = desensitize_mentions(text)
+        text = await llm_complete(system, user_prompt, max_tokens=1500)
+        text = desensitize_mentions((text or "Не удалось.")[:4000])
         await wait_msg.edit_text(
             f"📝 <b>Выжимка чата</b> ({len(rows)} сообщений)\n\n{text}",
             parse_mode="HTML",
             disable_notification=True,
         )
     except Exception as e:
-        log.exception("Groq error")
+        log.exception("LLM error")
         await wait_msg.edit_text(f"Ошибка: {e}")
 
 
