@@ -345,6 +345,36 @@ def desensitize_mentions(text: str) -> str:
     return _MENTION_RE.sub(lambda m: f"@{_ZWNJ}{m.group(1)}", text)
 
 
+# Telegram HTML поддерживает только узкий набор тегов. LLM любят генерить
+# <ul>/<li>/<p>/<br>/<h1> — это валит парсер. Чистим.
+_ALLOWED_TAGS = {"b", "strong", "i", "em", "u", "s", "strike", "del",
+                 "code", "pre", "a", "tg-spoiler", "blockquote"}
+
+
+def sanitize_telegram_html(text: str) -> str:
+    if not text:
+        return text
+    # Списки и параграфы → переводы строк и маркеры
+    text = _re.sub(r"<\s*li\s*>", "• ", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"<\s*/\s*li\s*>", "\n", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"<\s*/?\s*ul\s*>", "\n", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"<\s*/?\s*ol\s*>", "\n", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"<\s*/?\s*p\s*>", "\n", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"<\s*br\s*/?\s*>", "\n", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"<\s*h[1-6]\s*>", "<b>", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"<\s*/\s*h[1-6]\s*>", "</b>\n", text, flags=_re.IGNORECASE)
+
+    # Любые остальные теги, не входящие в whitelist, удаляем (открывающие/закрывающие/самозакрывающие)
+    def _strip(match):
+        tag = match.group(1).lower()
+        return match.group(0) if tag in _ALLOWED_TAGS else ""
+    text = _re.sub(r"</?\s*([a-zA-Z][a-zA-Z0-9-]*)[^>]*>", _strip, text)
+
+    # Лишние пустые строки
+    text = _re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def is_group(msg: Message) -> bool:
     return msg.chat.type in ("group", "supergroup")
 
@@ -1123,7 +1153,8 @@ async def cmd_summary(msg: Message):
     )
     try:
         text = await llm_complete(system, user_prompt, max_tokens=1500)
-        text = desensitize_mentions((text or "Не удалось.")[:4000])
+        text = sanitize_telegram_html(text or "Не удалось.")
+        text = desensitize_mentions(text[:4000])
         await wait_msg.edit_text(
             f"📝 <b>Выжимка чата</b> ({len(rows)} сообщений)\n\n{text}",
             parse_mode="HTML",
