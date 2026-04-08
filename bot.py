@@ -31,7 +31,8 @@ DB_PATH = os.getenv("DB_PATH", "activity.db")
 
 USE_TURSO = bool(TURSO_URL)
 
-SUMMARY_MSG_COUNT = 300
+SUMMARY_MSG_COUNT = 150
+SUMMARY_MAX_TEXT_LEN = 280
 SUMMARY_COOLDOWN_SEC = 5 * 60
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -939,12 +940,12 @@ async def cmd_digest(msg: Message):
 
     # Сообщения для AI-выжимки тем
     log_rows = await db_fetchall(
-        "SELECT user_id, username, text FROM messages WHERE chat_id=? AND text!='' AND ts >= datetime('now','-7 days') ORDER BY id DESC LIMIT 400",
+        "SELECT user_id, username, text FROM messages WHERE chat_id=? AND text!='' AND ts >= datetime('now','-7 days') ORDER BY id DESC LIMIT 200",
         (chat_id,),
     )
     log_rows.reverse()
     chat_log = "\n".join(
-        f"{('@' + un) if un else f'id:{uid}'}: {txt}"
+        f"{('@' + un) if un else f'id:{uid}'}: {(txt or '')[:SUMMARY_MAX_TEXT_LEN]}"
         for uid, un, txt in log_rows
     )
 
@@ -1041,7 +1042,7 @@ async def cmd_summary(msg: Message):
 
     rows.reverse()
     chat_log = "\n".join(
-        f"[{ts}] {('@' + uname) if uname else f'id:{uid}'}: {text}"
+        f"[{ts}] {('@' + uname) if uname else f'id:{uid}'}: {(text or '')[:SUMMARY_MAX_TEXT_LEN]}"
         for uid, uname, text, ts in rows
     )
 
