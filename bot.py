@@ -119,10 +119,9 @@ def _strip_cot(text: str) -> str:
 
 
 OPENROUTER_MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",   # 262k контекста, мощная, не думает вслух
-    "nousresearch/hermes-3-llama-3.1-405b:free", # 131k, 405B параметров
-    "meta-llama/llama-3.3-70b-instruct:free",   # 65k, проверенная
-    "google/gemma-3-27b-it:free",              # 131k, запасная (может думать вслух)
+    "meta-llama/llama-3.3-70b-instruct:free",   # 65k, инструктивная, не думает вслух
+    "nousresearch/hermes-3-llama-3.1-405b:free", # 131k, 405B, инструктивная
+    "google/gemma-3-27b-it:free",              # 131k, запасная
 ]
 
 
@@ -173,13 +172,13 @@ async def llm_complete(system: str, user: str, max_tokens: int = 1500) -> str:
     """Универсальная функция вызова LLM. Цепочка: Gemini → OpenRouter (DeepSeek) → Groq (аварийный).
     Каждый следующий пробуется только если предыдущий не ответил."""
 
-    # 1. Gemini (основной, бесплатный, 1M контекста)
-    result = await _call_gemini(system, user, max_tokens)
+    # 1. OpenRouter (основной, бесплатные модели)
+    result = await _call_openrouter(system, user, max_tokens)
     if result:
         return result
 
-    # 2. OpenRouter / DeepSeek V3.1 free (fallback, 128k контекста)
-    result = await _call_openrouter(system, user, max_tokens)
+    # 2. Gemini (если OpenRouter не справился)
+    result = await _call_gemini(system, user, max_tokens)
     if result:
         return result
 
@@ -1319,10 +1318,14 @@ async def cmd_summary(msg: Message):
     system = (
         "Ты — внимательный читатель Telegram-чата встреч по интересам. Тебе дают лог сообщений, "
         "ты пишешь короткую человеческую сводку: что реально происходило, кто что предложил, "
-        "о чём договорились, что осталось висеть. "
-        "САМОЕ ВАЖНОЕ: пиши только то, что прямо есть в логе. Никаких выдумок, никаких «возможно», "
-        "никаких догадок и риторических вопросов. Если о чём-то не говорили — не пиши об этом вообще. "
-        "Никаких имён — только @username из лога. Отвечай на русском, в HTML, без воды."
+        "о чём договорились, что осталось висеть.\n\n"
+        "КРИТИЧЕСКИЕ ПРАВИЛА:\n"
+        "— НИКОГДА не выводи свои мысли, рассуждения, reasoning, chain-of-thought. ТОЛЬКО итоговую сводку.\n"
+        "— Пиши ТОЛЬКО на русском языке. НИ ОДНОГО слова на английском.\n"
+        "— Пиши только то, что прямо есть в логе. Никаких выдумок, никаких «возможно», «вероятно».\n"
+        "— Никаких имён и фамилий — только @username из лога.\n"
+        "— Каждый @username форматируй как <b><u>@username</u></b> (жирный + подчёркнутый).\n"
+        "— Отвечай в HTML. Начинай сразу с 📌, без преамбул."
     )
     user_prompt = (
         f"Лог последних {len(rows)} сообщений:\n\n{chat_log}\n\n"
@@ -1344,7 +1347,8 @@ async def cmd_summary(msg: Message):
         "— Никаких выдуманных «открытых вопросов» и риторики.\n"
         "— Никаких «возможно», «вероятно», «утверждают ли». Только факты из лога.\n"
         "— Если в логе вообще ничего интересного — напиши одну строку: «Чат жил своей жизнью без важных тем».\n"
-        "— Максимум 300 слов."
+        "— Максимум 300 слов.\n"
+        "— Помни: @username всегда как <b><u>@username</u></b>."
     )
     try:
         text = await llm_complete(system, user_prompt, max_tokens=1500)
