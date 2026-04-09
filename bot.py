@@ -934,23 +934,23 @@ async def _render_stats(chat_id: int, period: str) -> str:
     total_react = total_react_row[0][0] if total_react_row else 0
 
     lines = [
-        f"📊 *Активность чата ({period_label})*\n",
-        f"💬 Сообщений: *{total_msg}* | ❤️ Реакций: *{total_react}*\n",
+        f"📊 <b>Активность чата ({period_label})</b>\n",
+        f"💬 Сообщений: <b>{total_msg}</b> | ❤️ Реакций: <b>{total_react}</b>\n",
     ]
     if rows_msg:
-        lines.append("🏆 *Топ по сообщениям:*")
+        lines.append("🏆 <b>Топ по сообщениям:</b>")
         for i, (uid, un, fn, cnt) in enumerate(rows_msg, 1):
             lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
     if rows_react_given:
-        lines.append("\n👍 *Топ по поставленным реакциям:*")
+        lines.append("\n👍 <b>Топ по поставленным реакциям:</b>")
         for i, (uid, un, fn, cnt) in enumerate(rows_react_given, 1):
             lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
     if rows_react_recv:
-        lines.append("\n❤️ *Топ по полученным реакциям:*")
+        lines.append("\n❤️ <b>Топ по полученным реакциям:</b>")
         for i, (uid, un, fn, cnt) in enumerate(rows_react_recv, 1):
             lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
     if rows_polls:
-        lines.append("\n🗳 *Топ по голосованиям:*")
+        lines.append("\n🗳 <b>Топ по голосованиям:</b>")
         for i, (uid, un, fn, cnt) in enumerate(rows_polls, 1):
             lines.append(f"  {i}. {user_label(uid, un, fn)} — {cnt}")
     if not rows_msg and not rows_react_given:
@@ -970,7 +970,7 @@ async def on_callback(cq: CallbackQuery):
         if data.startswith("stats:"):
             period = data.split(":", 1)[1]
             text = await _render_stats(chat_id, period)
-            await cq.message.answer(text, parse_mode="Markdown")
+            await cq.message.answer(text, parse_mode="HTML")
         elif data == "digest":
             await cq.answer("Готовлю дайджест…")
             await cmd_digest(cq.message)
