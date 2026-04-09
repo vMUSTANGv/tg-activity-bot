@@ -95,6 +95,29 @@ async def _call_gemini(system: str, user: str, max_tokens: int) -> str | None:
     return None
 
 
+def _strip_cot(text: str) -> str:
+    """Вырезает chain-of-thought из ответа модели.
+    1. Убирает блоки <think>...</think>
+    2. Если текст начинается с английского reasoning — ищет первую строку с кириллицей/эмодзи
+    3. Возвращает полезную часть или пустую строку если ничего не осталось."""
+    # 1. <think> блоки (DeepSeek R1, Qwen и другие)
+    text = _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL | _re.IGNORECASE).strip()
+
+    # 2. Если начинается с английского reasoning — ищем начало русского текста
+    cot_markers = ("let's ", "we need to", "i need to", "let me ", "i'll ", "i will ",
+                   "first,", "okay,", "now,", "here is", "here's", "the log", "looking at")
+    if text and text[:80].lower().startswith(tuple(cot_markers)):
+        # Ищем первую строку содержащую кириллицу или эмодзи-заголовок
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            if _re.search(r"[а-яА-ЯёЁ]", line) or _re.search(r"[📌📅✅💡🔗⚠️]", line):
+                text = "\n".join(lines[i:]).strip()
+                break
+        else:
+            return ""  # Вообще нет русского текста
+    return text
+
+
 OPENROUTER_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free",   # 262k контекста, мощная, не думает вслух
     "nousresearch/hermes-3-llama-3.1-405b:free", # 131k, 405B параметров
@@ -134,14 +157,11 @@ async def _call_openrouter(system: str, user: str, max_tokens: int) -> str | Non
                 if choices:
                     text = (choices[0].get("message", {}).get("content") or "").strip()
                     if text:
-                        # Фильтр chain-of-thought: некоторые модели выдают свои мысли вместо ответа
-                        cot_markers = ("let's ", "we need to", "i need to", "let me ", "i'll ", "i will ")
-                        first_line = text[:100].lower()
-                        if any(first_line.startswith(m) for m in cot_markers):
-                            log.warning(f"OpenRouter {model} leaked chain-of-thought, skipping")
-                            continue
-                        log.info(f"OpenRouter model {model} succeeded")
-                        return text
+                        text = _strip_cot(text)
+                        if text:
+                            log.info(f"OpenRouter model {model} succeeded")
+                            return text
+                        log.warning(f"OpenRouter {model} returned only CoT, skipping")
                 log.warning(f"OpenRouter {model} returned empty: {data}")
             except Exception as e:
                 log.warning(f"OpenRouter {model} failed: {e}")
