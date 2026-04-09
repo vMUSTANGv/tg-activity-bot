@@ -184,7 +184,7 @@ async def llm_complete(system: str, user: str, max_tokens: int = 1500) -> str:
 
     # 3. Groq (аварийный, маленький лимит — обрезаем вход)
     if groq_client:
-        GROQ_USER_CHAR_BUDGET = 12000
+        GROQ_USER_CHAR_BUDGET = 7000  # Русский текст: ~2 символа/токен
         if len(user) > GROQ_USER_CHAR_BUDGET:
             user_compact = "[лог обрезан из-за лимита]\n\n" + user[-GROQ_USER_CHAR_BUDGET:]
         else:
