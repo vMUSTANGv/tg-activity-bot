@@ -1383,14 +1383,26 @@ PRIVATE_COMMANDS = [
 
 
 async def on_startup(app_or_bot=None):
-    await init_db()
-    await bot.delete_my_commands()
-    await bot.set_my_commands(GROUP_COMMANDS)  # default scope
-    await bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
-    await bot.set_my_commands(PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())
-    url = f"{RENDER_URL}{WEBHOOK_PATH}"
-    await bot.set_webhook(url, allowed_updates=["message", "edited_message", "message_reaction", "poll_answer", "callback_query", "chat_member"])
-    log.info(f"Webhook set: {url}")
+    # Render free tier часто глючит с DNS при холодном старте.
+    # Пробуем до 5 раз с паузой.
+    for attempt in range(1, 6):
+        try:
+            await init_db()
+            await bot.delete_my_commands()
+            await bot.set_my_commands(GROUP_COMMANDS)
+            await bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
+            await bot.set_my_commands(PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())
+            url = f"{RENDER_URL}{WEBHOOK_PATH}"
+            await bot.set_webhook(url, allowed_updates=["message", "edited_message", "message_reaction", "poll_answer", "callback_query", "chat_member"])
+            log.info(f"Webhook set: {url}")
+            return
+        except Exception as e:
+            log.warning(f"Startup attempt {attempt}/5 failed: {e}")
+            if attempt < 5:
+                await asyncio.sleep(3)
+            else:
+                log.error("All startup attempts failed, proceeding anyway")
+                raise
 
 
 async def health(request):
