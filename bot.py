@@ -96,10 +96,10 @@ async def _call_gemini(system: str, user: str, max_tokens: int) -> str | None:
 
 
 OPENROUTER_MODELS = [
-    "google/gemma-3-27b-it:free",              # 131k контекста, отличный русский
-    "nvidia/nemotron-3-super-120b-a12b:free",   # 262k контекста, мощная модель
+    "nvidia/nemotron-3-super-120b-a12b:free",   # 262k контекста, мощная, не думает вслух
     "nousresearch/hermes-3-llama-3.1-405b:free", # 131k, 405B параметров
     "meta-llama/llama-3.3-70b-instruct:free",   # 65k, проверенная
+    "google/gemma-3-27b-it:free",              # 131k, запасная (может думать вслух)
 ]
 
 
@@ -134,6 +134,12 @@ async def _call_openrouter(system: str, user: str, max_tokens: int) -> str | Non
                 if choices:
                     text = (choices[0].get("message", {}).get("content") or "").strip()
                     if text:
+                        # Фильтр chain-of-thought: некоторые модели выдают свои мысли вместо ответа
+                        cot_markers = ("let's ", "we need to", "i need to", "let me ", "i'll ", "i will ")
+                        first_line = text[:100].lower()
+                        if any(first_line.startswith(m) for m in cot_markers):
+                            log.warning(f"OpenRouter {model} leaked chain-of-thought, skipping")
+                            continue
                         log.info(f"OpenRouter model {model} succeeded")
                         return text
                 log.warning(f"OpenRouter {model} returned empty: {data}")
