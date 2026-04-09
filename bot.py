@@ -96,9 +96,10 @@ async def _call_gemini(system: str, user: str, max_tokens: int) -> str | None:
 
 
 OPENROUTER_MODELS = [
-    "deepseek/deepseek-chat:free",
-    "google/gemini-2.0-flash-exp:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-3-27b-it:free",              # 131k контекста, отличный русский
+    "nvidia/nemotron-3-super-120b-a12b:free",   # 262k контекста, мощная модель
+    "nousresearch/hermes-3-llama-3.1-405b:free", # 131k, 405B параметров
+    "meta-llama/llama-3.3-70b-instruct:free",   # 65k, проверенная
 ]
 
 
