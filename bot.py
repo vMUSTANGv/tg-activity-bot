@@ -95,39 +95,50 @@ async def _call_gemini(system: str, user: str, max_tokens: int) -> str | None:
     return None
 
 
+OPENROUTER_MODELS = [
+    "deepseek/deepseek-chat:free",
+    "google/gemini-2.0-flash-exp:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+]
+
+
 async def _call_openrouter(system: str, user: str, max_tokens: int) -> str | None:
-    """OpenRouter (DeepSeek V3.1 free) — OpenAI-совместимый API. Возвращает текст или None."""
+    """OpenRouter — пробует несколько бесплатных моделей по очереди. Возвращает текст или None."""
     if not OPENROUTER_API_KEY:
         return None
-    try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            resp = await client.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "HTTP-Referer": "https://tg-activity-bot.onrender.com",
-                    "X-Title": "tg-activity-bot",
-                },
-                json={
-                    "model": "deepseek/deepseek-chat-v3-0324:free",
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    "max_tokens": max_tokens,
-                    "temperature": 0.7,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            choices = data.get("choices", [])
-            if choices:
-                text = (choices[0].get("message", {}).get("content") or "").strip()
-                if text:
-                    return text
-            log.warning(f"OpenRouter returned empty: {data}")
-    except Exception as e:
-        log.warning(f"OpenRouter failed: {e}")
+
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        for model in OPENROUTER_MODELS:
+            try:
+                resp = await client.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "HTTP-Referer": "https://tg-activity-bot.onrender.com",
+                        "X-Title": "tg-activity-bot",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                        "max_tokens": max_tokens,
+                        "temperature": 0.7,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                choices = data.get("choices", [])
+                if choices:
+                    text = (choices[0].get("message", {}).get("content") or "").strip()
+                    if text:
+                        log.info(f"OpenRouter model {model} succeeded")
+                        return text
+                log.warning(f"OpenRouter {model} returned empty: {data}")
+            except Exception as e:
+                log.warning(f"OpenRouter {model} failed: {e}")
+                continue
     return None
 
 
