@@ -21,6 +21,7 @@ from groq import Groq
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or "0")
 _raw_allowed = os.getenv("ALLOWED_CHAT_IDS", "").strip()
 ALLOWED_CHAT_IDS: set[int] = set()
@@ -59,60 +60,113 @@ if GROQ_API_KEY:
 # ---------- LLM провайдеры ----------
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+async def _call_gemini(system: str, user: str, max_tokens: int) -> str | None:
+    """Gemini 2.0 Flash через REST. Возвращает текст или None при ошибке."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                GEMINI_URL,
+                headers={"x-goog-api-key": GEMINI_API_KEY},
+                json={
+                    "systemInstruction": {"parts": [{"text": system}]},
+                    "contents": [{"role": "user", "parts": [{"text": user}]}],
+                    "generationConfig": {
+                        "maxOutputTokens": max_tokens,
+                        "temperature": 0.7,
+                    },
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            cands = data.get("candidates", [])
+            if cands:
+                parts = cands[0].get("content", {}).get("parts", [])
+                text = "".join(p.get("text", "") for p in parts).strip()
+                if text:
+                    return text
+            log.warning(f"Gemini returned empty: {data}")
+    except Exception as e:
+        log.warning(f"Gemini failed: {e}")
+    return None
+
+
+async def _call_openrouter(system: str, user: str, max_tokens: int) -> str | None:
+    """OpenRouter (DeepSeek V3.1 free) — OpenAI-совместимый API. Возвращает текст или None."""
+    if not OPENROUTER_API_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            resp = await client.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "HTTP-Referer": "https://tg-activity-bot.onrender.com",
+                    "X-Title": "tg-activity-bot",
+                },
+                json={
+                    "model": "deepseek/deepseek-chat-v3-0324:free",
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "max_tokens": max_tokens,
+                    "temperature": 0.7,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            choices = data.get("choices", [])
+            if choices:
+                text = (choices[0].get("message", {}).get("content") or "").strip()
+                if text:
+                    return text
+            log.warning(f"OpenRouter returned empty: {data}")
+    except Exception as e:
+        log.warning(f"OpenRouter failed: {e}")
+    return None
 
 
 async def llm_complete(system: str, user: str, max_tokens: int = 1500) -> str:
-    """Универсальная функция вызова LLM. Сначала пробует Gemini, при ошибке падает на Groq.
-    На фолбэке Groq автоматически обрезает входной prompt, чтобы влезть в 6k TPM лимит."""
-    if GEMINI_API_KEY:
+    """Универсальная функция вызова LLM. Цепочка: Gemini → OpenRouter (DeepSeek) → Groq (аварийный).
+    Каждый следующий пробуется только если предыдущий не ответил."""
+
+    # 1. Gemini (основной, бесплатный, 1M контекста)
+    result = await _call_gemini(system, user, max_tokens)
+    if result:
+        return result
+
+    # 2. OpenRouter / DeepSeek V3.1 free (fallback, 128k контекста)
+    result = await _call_openrouter(system, user, max_tokens)
+    if result:
+        return result
+
+    # 3. Groq (аварийный, маленький лимит — обрезаем вход)
+    if groq_client:
+        GROQ_USER_CHAR_BUDGET = 12000
+        if len(user) > GROQ_USER_CHAR_BUDGET:
+            user_compact = "[лог обрезан из-за лимита]\n\n" + user[-GROQ_USER_CHAR_BUDGET:]
+        else:
+            user_compact = user
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
-                    GEMINI_URL,
-                    headers={"x-goog-api-key": GEMINI_API_KEY},
-                    json={
-                        "systemInstruction": {"parts": [{"text": system}]},
-                        "contents": [{"role": "user", "parts": [{"text": user}]}],
-                        "generationConfig": {
-                            "maxOutputTokens": max_tokens,
-                            "temperature": 0.7,
-                        },
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                cands = data.get("candidates", [])
-                if cands:
-                    parts = cands[0].get("content", {}).get("parts", [])
-                    text = "".join(p.get("text", "") for p in parts).strip()
-                    if text:
-                        return text
-                log.warning(f"Gemini returned empty: {data}")
+            response = await asyncio.to_thread(
+                groq_client.chat.completions.create,
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_compact},
+                ],
+                max_tokens=min(max_tokens, 1000),
+            )
+            return (response.choices[0].message.content or "").strip()
         except Exception as e:
-            log.warning(f"Gemini failed, falling back to Groq: {e}")
+            log.warning(f"Groq failed: {e}")
 
-    if not groq_client:
-        raise RuntimeError("Нет доступного LLM (ни GEMINI_API_KEY, ни GROQ_API_KEY).")
-
-    # Groq llama-3.1-8b-instant free tier = 6k TPM. Считаем грубо 1 токен ≈ 3.5 символа.
-    # Оставляем место под system (~500 ток) и output (max_tokens), берём ~3500 токенов на user → ~12000 символов.
-    GROQ_USER_CHAR_BUDGET = 12000
-    if len(user) > GROQ_USER_CHAR_BUDGET:
-        # Берём последний кусок — последние сообщения важнее старых
-        user_compact = "[лог обрезан до самых свежих сообщений из-за лимита фолбэка]\n\n" + user[-GROQ_USER_CHAR_BUDGET:]
-    else:
-        user_compact = user
-
-    response = await asyncio.to_thread(
-        groq_client.chat.completions.create,
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_compact},
-        ],
-        max_tokens=min(max_tokens, 1000),
-    )
-    return (response.choices[0].message.content or "").strip()
+    raise RuntimeError("Все LLM-провайдеры недоступны (Gemini, OpenRouter, Groq).")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -1129,7 +1183,7 @@ async def cmd_digest(msg: Message):
     )
 
     topics = "—"
-    if (GEMINI_API_KEY or groq_client) and chat_log:
+    if (GEMINI_API_KEY or OPENROUTER_API_KEY or groq_client) and chat_log:
         try:
             topics_raw = await llm_complete(
                 "Ты выделяешь главные темы недельного чата. Отвечай по-русски, очень кратко.",
@@ -1202,8 +1256,8 @@ async def cmd_summary(msg: Message):
         return
     _summary_last_call[msg.chat.id] = now
 
-    if not GEMINI_API_KEY and not groq_client:
-        await msg.answer("LLM не настроен (нужен GEMINI_API_KEY или GROQ_API_KEY).")
+    if not GEMINI_API_KEY and not OPENROUTER_API_KEY and not groq_client:
+        await msg.answer("LLM не настроен (нужен GEMINI_API_KEY, OPENROUTER_API_KEY или GROQ_API_KEY).")
         return
 
     chat_id = msg.chat.id
